@@ -23,7 +23,7 @@ valuationagent run examples/structured_request.json --chat
 
 命令行采用分步向导、深蓝/青绿配色、实时进度、Agent/工具动态与估值结果分区。宽屏并排，窄屏堆叠；日志重定向自动使用静态输出，也可显式加 `--plain`。建议终端宽度 100 列以上；尊重 `NO_COLOR` 设置。
 
-[启动欢迎页](docs/assets/cli-welcome-112.png) · [欢迎页 HTML](docs/assets/cli-welcome-112.html)
+[启动欢迎页 SVG](docs/assets/cli-welcome-112.svg) · [欢迎页 HTML](docs/assets/cli-welcome-112.html)
 
 [宽屏预览](docs/assets/cli-preview-112.html) · [窄屏预览](docs/assets/cli-preview-70.html)
 

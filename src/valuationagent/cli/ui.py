@@ -75,23 +75,28 @@ def banner(language="zh-CN"):
 
 
 # A small original terminal wordmark; no font downloads or extra dependencies.
+#
+# The first version used a block character (``█``) for every stroke.  It looked
+# like a low-resolution bitmap on some Windows terminal fonts.  Thin ASCII
+# strokes are intentionally used here: they stay sharp when the terminal is
+# scaled, copied to a log, or rendered in the preview SVG.
 _GLYPHS = {
-    "V": ("█   █", "█   █", "█   █", " █ █ ", "  █  "),
-    "A": (" ███ ", "█   █", "█████", "█   █", "█   █"),
-    "L": ("█    ", "█    ", "█    ", "█    ", "█████"),
-    "U": ("█   █", "█   █", "█   █", "█   █", " ███ "),
-    "T": ("█████", "  █  ", "  █  ", "  █  ", "  █  "),
-    "I": ("█████", "  █  ", "  █  ", "  █  ", "█████"),
-    "O": (" ███ ", "█   █", "█   █", "█   █", " ███ "),
-    "N": ("█   █", "██  █", "█ █ █", "█  ██", "█   █"),
-    "G": (" ███ ", "█    ", "█ ███", "█   █", " ███ "),
-    "E": ("█████", "█    ", "████ ", "█    ", "█████"),
+    "V": ("\\   /", "\\   /", " \\ / ", " \\ / ", "  V  ", "  |  ", "  |  "),
+    "A": ("  /\\ ", " /  \\", "/____\\", "|    |", "|    |", "|    |", "|    |"),
+    "L": ("|    ", "|    ", "|    ", "|    ", "|    ", "|    ", "|____"),
+    "U": ("|   |", "|   |", "|   |", "|   |", "|   |", " \\_/ ", "     "),
+    "T": ("-----", "  |  ", "  |  ", "  |  ", "  |  ", "  |  ", "  |  "),
+    "I": ("-----", "  |  ", "  |  ", "  |  ", "  |  ", "  |  ", "-----"),
+    "O": (" /-\\ ", "/   \\", "|   |", "|   |", "|   |", "\\   /", " \\-/ "),
+    "N": ("|\\  |", "| \\ |", "|  \\|", "|   |", "|   |", "|   |", "|   |"),
+    "G": (" /--\\", "/    ", "| /--", "| |  |", "| \\__|", "\\    ", " \\__/"),
+    "E": ("-----", "|    ", "|    ", "---- ", "|    ", "|    ", "-----"),
 }
 
 
 def _wordmark(words):
     lines = []
-    for row in range(5):
+    for row in range(7):
         line = Text(no_wrap=True)
         for index, (word, color) in enumerate(words):
             if index:
