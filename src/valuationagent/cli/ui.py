@@ -74,50 +74,53 @@ def banner(language="zh-CN"):
     return panel(title)
 
 
-# A small original terminal wordmark; no font downloads or extra dependencies.
-#
-# The first version used a block character (``█``) for every stroke.  It looked
-# like a low-resolution bitmap on some Windows terminal fonts.  Thin ASCII
-# strokes are intentionally used here: they stay sharp when the terminal is
-# scaled, copied to a log, or rendered in the preview SVG.
-_GLYPHS = {
-    "V": ("\\   /", "\\   /", " \\ / ", " \\ / ", "  V  ", "  |  ", "  |  "),
-    "A": ("  /\\ ", " /  \\", "/____\\", "|    |", "|    |", "|    |", "|    |"),
-    "L": ("|    ", "|    ", "|    ", "|    ", "|    ", "|    ", "|____"),
-    "U": ("|   |", "|   |", "|   |", "|   |", "|   |", " \\_/ ", "     "),
-    "T": ("-----", "  |  ", "  |  ", "  |  ", "  |  ", "  |  ", "  |  "),
-    "I": ("-----", "  |  ", "  |  ", "  |  ", "  |  ", "  |  ", "-----"),
-    "O": (" /-\\ ", "/   \\", "|   |", "|   |", "|   |", "\\   /", " \\-/ "),
-    "N": ("|\\  |", "| \\ |", "|  \\|", "|   |", "|   |", "|   |", "|   |"),
-    "G": (" /--\\", "/    ", "| /--", "| |  |", "| \\__|", "\\    ", " \\__/"),
-    "E": ("-----", "|    ", "|    ", "---- ", "|    ", "|    ", "-----"),
+# Keep the same flowing slant font used by the TradingAgents welcome screen.
+# It is embedded as plain ASCII so the CLI has no font download or runtime
+# dependency. Thin strokes remain sharp in Windows Terminal and SVG previews.
+_WORDMARKS = {
+    'full': (
+        ' _    __      __            __  _             ___                    __',
+        '| |  / /___ _/ /_  ______ _/ /_(_)___  ____  /   | ____ ____  ____  / /_',
+        '| | / / __ `/ / / / / __ `/ __/ / __ \\/ __ \\/ /| |/ __ `/ _ \\/ __ \\/ __/',
+        '| |/ / /_/ / / /_/ / /_/ / /_/ / /_/ / / / / ___ / /_/ /  __/ / / / /_',
+        '|___/\\__,_/_/\\__,_/\\__,_/\\__/_/\\____/_/ /_/_/  |_\\__, /\\___/_/ /_/\\__/',
+        '                                                /____/',
+    ),
+    'valuation': (
+        ' _    __      __            __  _',
+        '| |  / /___ _/ /_  ______ _/ /_(_)___  ____',
+        '| | / / __ `/ / / / / __ `/ __/ / __ \\/ __ \\',
+        '| |/ / /_/ / / /_/ / /_/ / /_/ / /_/ / / / /',
+        '|___/\\__,_/_/\\__,_/\\__,_/\\__/_/\\____/_/ /_/',
+        '',
+    ),
+    'agent': (
+        '    ___                    __',
+        '   /   | ____ ____  ____  / /_',
+        '  / /| |/ __ `/ _ \\/ __ \\/ __/',
+        ' / ___ / /_/ /  __/ / / / /_',
+        '/_/  |_\\__, /\\___/_/ /_/\\__/',
+        '      /____/',
+    ),
 }
 
-
-def _wordmark(words):
-    lines = []
-    for row in range(7):
-        line = Text(no_wrap=True)
-        for index, (word, color) in enumerate(words):
-            if index:
-                line.append("   ")
-            line.append(" ".join(_GLYPHS[c][row] for c in word), style=color)
-        lines.append(line)
-    return Group(*lines)
-
+def _wordmark(name, color):
+    return Group(
+        *(Text(line, style=color, no_wrap=True) for line in _WORDMARKS[name])
+    )
 
 def welcome(width=116, height=40):
     """Entrance screen, sized independently of the compact execution dashboard."""
     width = min(width, 116)
-    teal, blue = "bold #5EEAD4", "bold #60A5FA"
+    teal, blue = "#5EEAD4", "#60A5FA"
     compact = height < (30 if width >= 94 else 36)
     if width >= 94 and not compact:
-        logo = _wordmark([("VALUATION", teal), ("AGENT", blue)])
+        logo = _wordmark("full", teal)
     elif width >= 62 and not compact:
         logo = Group(
-            Align.center(_wordmark([("VALUATION", teal)])),
+            Align.center(_wordmark("valuation", teal)),
             Text(""),
-            Align.center(_wordmark([("AGENT", blue)])),
+            Align.center(_wordmark("agent", blue)),
         )
     else:
         logo = Text("ValuationAgent", style=teal, justify="center")
