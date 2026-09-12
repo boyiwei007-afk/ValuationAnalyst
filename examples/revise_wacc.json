@@ -1,0 +1,4 @@
+{
+  "reason": "将 WACC 调整为 8%，保留原版本并重算受影响部分",
+  "changes": {"assumptions": {"wacc": "0.08"}}
+}

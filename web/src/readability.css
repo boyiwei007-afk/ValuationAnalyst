@@ -1,0 +1,20 @@
+/* Secondary text remains readable on both white and lightly tinted surfaces. */
+.subtle,.page-heading p,.phase>div>span,.field-hint,.trace-heading p,.composer small,
+.message-meta span,.request-summary span,.card-heading p,.range-axis,.range-row>small,
+.chart-legend,.heat-caption,.heat-legend,.heat-legend small,.heat-selection small,
+.heat-selection>span,.source-footer,.fact-list dt,.evidence-entry p,.finding p,
+.file-drop small,.choice small,.privacy-note,.modal-intro,.conversation-context small,
+.stage-node>summary>span:not(.stage-marker),.stage-content>p,.tool-row small,
+.execution-stats span,.table-scroll th,.table-scroll td,.history-table small,
+.setup-footer>span,.setup-steps button,.chart-note,.report-text,.offline-notice,
+.result-metrics span,.data-details>summary{color:#617584}
+.result-metrics small{color:#4f766b}.result-metrics>div+div small{color:#58728e}
+.forecast-chart text{fill:#617584}.heatmap th:first-child{font-size:12px}
+.stage-node.running>summary>span:not(.stage-marker){color:#168173}
+.sidebar-bottom small,.history-item small{color:#8ca4b5}
+.error-notice{color:#a64a54}.warning-text,.warning-line{color:#927028}
+.agent-message p,.modal-intro,.report-text{line-height:1.85}
+@media(min-width:761px) and (max-width:980px){
+  .workspace-grid{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr)}
+  .report-layout{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
+}
