@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from valuationagent.api.main import create_app
 from valuationagent.application.runner import ValuationRunner
-from valuationagent.cli.main import app, interactive
+from valuationagent.cli.main import app, wizard
 from valuationagent.cli.ui import THEME, welcome
 from valuationagent.core.data import demo_financials, demo_peers
 from valuationagent.finance.reference import ReferenceFinancialModel
@@ -202,7 +202,7 @@ def test_cli_language_option_and_wizard_choices_reach_request(
         "valuationagent.cli.main.conversation", lambda *args, **kwargs: None
     )
     with create_app_session(input=DummyInput(), output=DummyOutput()):
-        interactive(language=None)
+        wizard(language=None)
     assert "Welcome to ValuationAgent" in capsys.readouterr().out
     record = next(
         r

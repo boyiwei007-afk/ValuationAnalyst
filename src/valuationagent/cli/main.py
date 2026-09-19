@@ -75,6 +75,24 @@ def text_input(title, default=""):
     return ask(questionary.text(title, default=default, style=STYLE))
 
 
+def autocomplete(title, choices, default=""):
+    """Select a suggested value while keeping free-form input available."""
+    return ask(
+        questionary.autocomplete(
+            title,
+            choices=choices,
+            default=default,
+            style=STYLE,
+            instruction="↑↓ 选择建议 · 直接输入也可以",
+        )
+    )
+
+
+def secret_input(title):
+    """Read a secret without echoing it to the terminal or storing it."""
+    return ask(questionary.password(title, style=STYLE, instruction="输入后不会回显"))
+
+
 def read_request(path):
     return ValuationRequest.model_validate_json(
         Path(path).read_text(encoding="utf-8-sig")
@@ -185,8 +203,8 @@ def upload(store, path, role):
     return store.save_upload(target.name, role, None, target.read_bytes())["file_id"]
 
 
-@app.command()
-def interactive(
+@app.command("wizard")
+def wizard(
     language: Language | None = typer.Option(
         None, "--language", help="预选语言；默认进入语言选择 / Preselect language"
     ),
@@ -344,6 +362,29 @@ def interactive(
         )
     except (ValueError, OSError, LlmError) as exc:
         friendly_error(exc, language)
+
+
+@app.command()
+def interactive(language: Language | None = typer.Option(None, "--language")):
+    """欢迎页后直接描述需求、上传资料，用选项或文字确认。"""
+    if not sys.stdin.isatty():
+        console.print("交互研究需要终端。脚本中请使用 valuationagent run 文件。")
+        raise typer.Exit(2)
+    from valuationagent.cli.research import launch_research
+    launch_research(language=language)
+
+
+@app.command("research")
+def research_command(
+    resume: str | None = typer.Option(None, "--resume"),
+    language: Language | None = typer.Option(None, "--language"),
+):
+    """开始研究对话，或恢复已保存的研究会话。"""
+    from valuationagent.cli.research import launch_research
+    try:
+        launch_research(language=language, session_id=resume)
+    except (ValueError, KeyError, LlmError) as exc:
+        friendly_error(exc)
 
 
 HELP = """直接提问：本次用了哪些假设？  /  把 WACC 改为 8%

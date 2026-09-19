@@ -12,6 +12,14 @@ export async function api(path, options = {}) {
   return response.status === 204 ? null : response.json()
 }
 export const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body) })
+export async function downloadResearch(id, format) {
+  const response = await fetch(`${base}/api/research-sessions/${id}/export?format=${format}`)
+  if (!response.ok) throw new Error('导出失败 / Export failed')
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url; link.download = `${id}.${format}`; link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 export async function uploadFile(file, role) {
   if (file.size > 50 * 1024 * 1024) throw new Error('文件不能超过 50 MB / Maximum file size: 50 MB')
   const data = new FormData()

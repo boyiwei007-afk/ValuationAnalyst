@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -47,9 +48,25 @@ class OpenAICompatibleClient:
             payload.update(
                 tools=tools, tool_choice=tool_choice, parallel_tool_calls=False
             )
+        # DeepSeek's default thinking mode and forced tool selection differ from
+        # generic Chat Completions. Scope vendor-specific fields to its host.
+        from urllib.parse import urlsplit
+        if urlsplit(self.config.base_url).hostname == "api.deepseek.com":
+            thinking = "disabled" if self.config.thinking == "auto" else self.config.thinking
+            payload["thinking"] = {"type": thinking}
+            payload.pop("temperature", None)
+            if thinking == "enabled":
+                payload["max_tokens"] = max(max_tokens, 4096)
+                if tools:
+                    payload["tool_choice"] = "auto"
         try:
             with httpx.Client(timeout=self.config.timeout_seconds) as client:
-                response = client.post(endpoint, headers=headers, json=payload)
+                for attempt in range(3):
+                    response = client.post(endpoint, headers=headers, json=payload)
+                    if response.status_code not in {429, 502, 503, 504} or attempt == 2:
+                        break
+                    if self.revoked.wait(.4 * (2 ** attempt)):
+                        raise LlmError("MODEL_SESSION_REVOKED: 模型会话已删除。")
                 response.raise_for_status()
                 body = response.json()
         except httpx.HTTPStatusError as exc:
@@ -61,8 +78,19 @@ class OpenAICompatibleClient:
                 if status == 429
                 else "供应商请求失败"
             )
+            hint = ""
+            if status == 400:
+                # Never copy vendor bodies into persisted conversations: some
+                # gateways echo credentials or uploaded content in error strings.
+                try:
+                    detail = str(exc.response.json()).lower()
+                    names = [name for name in ("tool_choice", "thinking", "temperature", "reasoning_content", "max_tokens", "model", "messages", "tools") if name in detail]
+                    if names:
+                        hint = " 涉及参数：" + ", ".join(names) + "。"
+                except ValueError:
+                    pass
             raise LlmError(
-                f"LLM_HTTP_{status}: {category}，请检查模型配置或稍后恢复。"
+                f"LLM_HTTP_{status}: {category}，请检查模型配置或稍后恢复。{hint}"
             ) from None
         except (httpx.HTTPError, ValueError):
             raise LlmError(
@@ -74,6 +102,26 @@ class OpenAICompatibleClient:
                 raise TypeError()
         except (KeyError, IndexError, TypeError):
             raise LlmError("LLM_RESPONSE_INVALID: 响应缺少有效 message") from None
+        # Some OpenAI-compatible gateways serialize function arguments as an
+        # object while others return the JSON text required by the protocol.
+        # Normalize both forms before the finite tool loop validates them.
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            normalized_calls = []
+            for item in tool_calls:
+                if not isinstance(item, dict):
+                    normalized_calls.append(item)
+                    continue
+                function = item.get("function")
+                if isinstance(function, dict) and isinstance(function.get("arguments"), (dict, list)):
+                    item = dict(item)
+                    item["function"] = dict(function)
+                    item["function"]["arguments"] = json.dumps(
+                        function["arguments"], ensure_ascii=False, separators=(",", ":")
+                    )
+                normalized_calls.append(item)
+            message = dict(message)
+            message["tool_calls"] = normalized_calls
         if self.revoked.is_set():
             raise LlmError("MODEL_SESSION_REVOKED: 模型会话已删除。")
         return message
@@ -134,6 +182,7 @@ class OpenAICompatibleClient:
             ),
             "model": os.getenv("VALUATION_LLM_MODEL", ""),
             "api_key": os.getenv("VALUATION_LLM_API_KEY", ""),
+            "thinking": os.getenv("VALUATION_LLM_THINKING", "auto"),
         }
         if not values["model"] or not values["api_key"]:
             raise LlmError(

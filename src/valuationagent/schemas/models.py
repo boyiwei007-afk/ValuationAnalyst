@@ -1,3 +1,9 @@
+'''
+这份文件用 Pydantic 定义了一整套**企业估值系统的数据契约**——
+把"公司、财务、假设、估值方法、运行状态、API 请求响应"等所有数据都规定成严格的类型模型，
+让 CLI、API、Agent 三方共享同一套"合法数据长什么样"的规矩，
+**它不负责计算，只负责把关和定型**。
+'''
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
@@ -213,6 +219,7 @@ class ModelConnectionInput(ApiModel):
     model: str = Field(min_length=1)
     api_key: SecretStr = Field(min_length=1)
     timeout_seconds: float = Field(default=45.0, gt=1, le=180)
+    thinking: Literal["auto", "enabled", "disabled"] = "auto"
 
     @field_validator("base_url")
     @classmethod

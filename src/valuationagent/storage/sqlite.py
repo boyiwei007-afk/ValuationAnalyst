@@ -52,6 +52,14 @@ class SQLiteRunStore:
             connection.executescript(
                 """
                 PRAGMA journal_mode=WAL;
+                CREATE TABLE IF NOT EXISTS research_sessions (
+                    session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                    session_json TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS research_documents (
+                    session_id TEXT NOT NULL, file_id TEXT NOT NULL,
+                    blocks_json TEXT NOT NULL, PRIMARY KEY(session_id, file_id)
+                );
                 CREATE TABLE IF NOT EXISTS lineage (
                     run_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, parent_id TEXT,
                     revision INTEGER NOT NULL, reason TEXT,
@@ -280,8 +288,8 @@ class SQLiteRunStore:
             raise ValueError("file exceeds the 50 MB limit")
         file_id = f"file_{uuid.uuid4().hex}"
         safe_suffix = Path(name).suffix.lower()
-        if safe_suffix not in {".pdf", ".xlsx", ".xls", ".csv", ".json"}:
-            raise ValueError("supported file types: PDF, Excel, CSV, JSON")
+        if safe_suffix not in {".pdf", ".xlsx", ".xls", ".csv", ".json", ".txt", ".md"}:
+            raise ValueError("supported file types: PDF, Excel, CSV, JSON, TXT, Markdown")
         target = (self.upload_dir / f"{file_id}{safe_suffix}").resolve()
         if self.upload_dir not in target.parents:
             raise ValueError("invalid file name")
@@ -398,3 +406,46 @@ class SQLiteRunStore:
     def release(self, run_id: str, owner: str) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM leases WHERE run_id=? AND owner=?", (run_id, owner))
+
+    def create_research(self, session):
+        with self._lock, self._connect() as db:
+            db.execute("INSERT INTO research_sessions VALUES(?,?,?,?)", (
+                session.session_id, session.revision, session.model_dump_json(),
+                session.updated_at.isoformat()))
+        return session
+
+    def get_research(self, session_id):
+        from valuationagent.schemas.research import ResearchSession
+        with self._connect() as db:
+            row = db.execute("SELECT session_json FROM research_sessions WHERE session_id=?", (session_id,)).fetchone()
+        if row is None:
+            raise KeyError(session_id)
+        return ResearchSession.model_validate_json(row[0])
+
+    def save_research(self, session):
+        previous = session.revision
+        updated = session.model_copy(update={"revision": previous + 1, "updated_at": _utc_now()})
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "UPDATE research_sessions SET revision=?,session_json=?,updated_at=? WHERE session_id=? AND revision=?",
+                (updated.revision, updated.model_dump_json(), updated.updated_at.isoformat(), session.session_id, previous))
+            if cursor.rowcount != 1:
+                raise ValueError("会话已更新，请刷新后重试。")
+        session.revision, session.updated_at = updated.revision, updated.updated_at
+        return session
+
+    def list_research(self, limit=30):
+        with self._connect() as db:
+            rows = db.execute("SELECT session_id FROM research_sessions ORDER BY updated_at DESC LIMIT ?", (max(1, min(limit, 100)),)).fetchall()
+        return [self.get_research(row[0]) for row in rows]
+
+    def save_research_blocks(self, session_id, file_id, blocks):
+        with self._lock, self._connect() as db:
+            db.execute("INSERT OR REPLACE INTO research_documents VALUES(?,?,?)", (session_id, file_id, _json(blocks)))
+
+    def research_blocks(self, session_id, file_id):
+        with self._connect() as db:
+            row = db.execute("SELECT blocks_json FROM research_documents WHERE session_id=? AND file_id=?", (session_id, file_id)).fetchone()
+        if row is None:
+            raise ValueError("文件尚未加入当前会话，请先上传。")
+        return json.loads(row[0])

@@ -9,8 +9,11 @@
 ```powershell
 conda activate economic_agent
 
-# 欢迎页 → 语言选择 → 分步配置 → 实时执行 → 持续对话
+# 欢迎提示 → 自由对话 / 上传资料 → 选项确认 → 持续研究
 valuationagent interactive
+
+# 原有结构化配置和参考模型演示仍可使用
+valuationagent wizard
 
 # 直接体验合成数据，并进入对话
 valuationagent demo --chat
@@ -19,7 +22,40 @@ valuationagent demo --chat
 valuationagent run examples/structured_request.json --chat
 ```
 
-也可以直接输入 `valuationagent` 进入向导。已有环境使用 editable 安装时，代码修改立即生效；需要更新安装元数据时运行 `python -m pip install -e . --no-deps`。未安装入口时使用 `python -m valuationagent.cli.main interactive`。
+也可以直接输入 `valuationagent` 进入研究对话。已有环境使用 editable 安装时，代码修改立即生效；首次安装或需要文件解析依赖时运行 `python -m pip install -e ".[documents]"`。未安装入口时使用 `python -m valuationagent.cli.main interactive`。
+
+首次进入 `interactive` 或新建研究时，CLI 会先打开模型配置向导：可选择 DeepSeek、OpenAI 或其他 OpenAI Compatible 接口；模型名和公司名支持建议补全，也可以直接输入；API Key 使用隐藏输入，只在本次进程的模型会话中使用。验证失败会回到资料整理模式，可稍后用 `/connect` 重试。网页端点击“模型连接”打开同样的配置窗口，研究对象会自动带入欢迎页。
+
+## 新版研究入口
+
+CLI 和网页默认打开资料研究对话，不要求用户一开始就提供完整财务快照。欢迎提示框提供研究目标、文件上传和政策分析示例。研究会话与原有估值任务分开保存，先完成资料准备，再等待正式金融模型接入。
+
+1. 输入公司、研究目标，或上传现有资料。连接模型后，LLM 理解上下文，按需读取文件原文，而不是把整个年报一次塞入提示词。
+2. 公司、估值日、方法等设置先形成待确认方案。CLI 方向键选择，Web 点击选项后提交；也可以直接输入修改要求。
+3. 提取出的数值先进入候选区，保留原始值、单位、期间、合并/母公司口径、原文引用和页码/工作表位置。用户对话里补充的数据标为手工来源。
+4. 明确选择后才采纳候选。单位或口径缺失、同字段冲突等警告不能批量确认。更正保留旧记录；采纳提取值不等同于财务审核通过。
+5. 继续追问政策、补充文件、检查资料缺口，或导出研究资料及对话。JSON 与可打印 HTML 已实现，正式 PDF/Excel 估值报告仍待接入。
+
+文本型 PDF、XLSX、CSV、JSON、TXT、MD 支持真实解析，不要求统一列名或模板；语义字段提取需要连接 LLM。扫描件 OCR 尚未接入，旧 `.xls` 请先另存为 `.xlsx`。Excel 中的公式不会执行。读取成功不代表所有表格均被准确识别，提取结果仍需核对来源。
+
+```text
+我想研究 600519，先帮我整理需要的历史财务数据。
+/upload examples/research_sample.txt
+提取这份资料中的营业收入，保留出处，缺失信息不要猜。
+/confirm
+/files
+/tools
+/prepare
+/export json
+/export html
+/quit
+```
+
+样例文件是明确标注的合成资料。退出时显示恢复命令：`valuationagent research --resume <research_id>`。研究会话、原文块、候选与确认事件保存在本地 SQLite；密钥不保存。未连接模型时可上传与预览原文，并用 `/company 名称`、`/date YYYY-MM-DD`、`/methods dcf,pe` 整理范围，不能进行通用自然语言提取。
+
+这一阶段没有连接正式金融计算、A 股在线取数、联网搜索或外部金融插件。LLM 可以记录检索需求，并提供“上传资料 / 保留缺口”选项，不能把未执行的搜索描述成已完成。原有参考模型继续通过 `wizard`、`demo`、`run` 使用。
+
+应用层契约已先冻结：`schemas/agent.py` 定义意图、上下文快照、证据、搜索查询/结果、政策影响卡片和导出产物；`search/providers.py` 提供零网络的 `MockSearchProvider` 与显式的 `UnavailableSearchProvider`。后续接入 A 股数据或联网搜索时，只需实现同一 `SearchProvider` 协议，并保存来源与截止日期，不能绕过证据复核直接填入估值。
 
 命令行采用分步向导、深蓝/青绿配色、实时进度、Agent/工具动态与估值结果分区。宽屏并排，窄屏堆叠；日志重定向自动使用静态输出，也可显式加 `--plain`。建议终端宽度 100 列以上；尊重 `NO_COLOR` 设置。
 
@@ -34,7 +70,7 @@ valuationagent run examples/structured_request.json --chat
 向导第一步可选简体中文（`zh-CN`）或 English（`en-US`）。后续向导、工作流标签、结果摘要和常用对话随选择切换。已有任务继续对话时自动读取保存的语言；旧请求未填写语言时默认中文。
 
 ```powershell
-# 跳过语言提问，直接使用英文向导
+# 跳过语言提问，直接使用英文研究对话
 valuationagent interactive --language en-US
 
 # 英文演示及持续对话
@@ -50,7 +86,7 @@ CLI 与 Web 共用 `ValuationRequest.language`，API 可在 `POST /api/runs` 的
 
 开发接入：`request.agent_parameters()` 返回 JSON 可序列化的任务选择；执行前 Agent、对话 Agent 的上下文及财务检查工具已接入它。金融插件仍接收完整的 `ValuationRequest`，可直接读取 `request.language / methods / forecast_years / assumptions` 等字段；API 密钥独立配置，不放在任务参数中。详见[接入契约](docs/金融插件接入契约.md)。
 
-## 对话与更正
+## 参考模型任务的对话与更正
 
 ```text
 本次用了哪些假设？
@@ -98,11 +134,23 @@ $env:VALUATION_LLM_API_KEY = "你的密钥"
 valuationagent run examples/structured_request.json --live --chat
 ```
 
+新版研究入口在检测到模型名称与密钥后自动使用模型；已有 CLI 会话可用 `/connect` 重新检查连接。DeepSeek 官方接口示例：
+
+```powershell
+$env:VALUATION_LLM_BASE_URL = "https://api.deepseek.com"
+$env:VALUATION_LLM_MODEL = "deepseek-flash"
+$env:VALUATION_LLM_API_KEY = "你的密钥"
+$env:VALUATION_LLM_THINKING = "auto"
+valuationagent
+```
+
+模型名称应与账户实际可用名称一致。`THINKING=auto` 在 DeepSeek 官方端点关闭思考模式，使用工具调用循环；显式 `enabled` 会调整工具选择并回传协议要求的临时 `reasoning_content`。内部思考内容不写入研究记录。400 错误只显示脱敏的参数提示，429/502/503/504 做有限重试。
+
 环境变量由当前进程读取，`.env.example` 只是示例，不会自动加载。Web 通过 `POST /api/model-sessions` 建立内存会话。连接测试会验证工具调用，而不只是问一句 OK。
 
 会话密钥不主动持久化；供应商错误正文不写入事件、报告或响应。删除会话会撤销它创建的客户端。重启程序后，实时任务需要重新提供模型配置；CLI 的 `chat/resume` 会从环境变量读取。
 
-当前实现已经通过模拟供应商与 HTTP 协议测试；本轮没有使用真实供应商密钥联调。
+当前实现已经通过模拟供应商与 HTTP 协议测试；已用临时会话联调过 DeepSeek `deepseek-flash` 和 `deepseek-v4-pro` 的工具调用。模型名称仍以你的账号 `/models` 返回为准。
 
 ## 数据模式
 
@@ -118,7 +166,7 @@ valuationagent run examples/structured_request.json --live --chat
 - 历史文件使用角色 historical_financials，ID 放入 file_ids；JSON 可以是 FinancialSnapshot 或包含 financials/peers 的对象。
 - 假设文件使用角色 assumptions，ID 放入 assumption_file_ids；JSON 可以是 AssumptionInputs 或包含 assumptions 的对象。
 - 选 upload 却没有对应文件、文件角色冲突、上传与手工假设混用，都会明确阻断。
-- A 股在线取数和 PDF/Excel 解析尚未接入。上传可以接收这些文件，但不能生成假财务；用户可复核后补充结构化数据继续。
+- A 股在线取数尚未接入。新版研究会话可解析 PDF/XLSX 并经 LLM 提取候选，但尚未自动转换为参考模型所需的严格 FinancialSnapshot；原有 `run` 路径仍要求结构化数据。
 
 金融接口、单位、证据、期间政策及插件替换方式见[金融插件接入契约](docs/金融插件接入契约.md)。
 
@@ -143,7 +191,9 @@ npm.cmd --prefix web run build
 valuationagent serve --host 127.0.0.1 --port 8000
 ```
 
-网页使用方式：
+网页默认显示新版研究入口：左侧自由对话与确认选项，右侧资料原文、候选字段和真实工具执行记录；支持上传、研究历史恢复和 JSON/HTML 导出。顶部“连接模型”填写接口地址、模型和密钥后启用 LLM。文件可先上传，连接后再要求提取。服务重启或模型会话失效时需要重新连接。
+
+通过“打开原有分步向导 / 参考模型演示”可进入以下既有流程：
 
 1. **新建估值研究**：选择演示 / 结构化 / Live Agent，填写企业、估值日与语言；继续选择财务来源、假设来源、估值方法和预测期。
 2. **模型连接**：Live Agent 填写兼容接口地址、模型名称、API Key，实际验证工具调用后创建后端临时会话。密钥不写入 localStorage、任务或报告。刷新网页后需重新连接；旧任务可以重新附加会话而不重跑估值。
@@ -170,6 +220,14 @@ POST   /api/model-sessions
 DELETE /api/model-sessions/{session_id}
 POST   /api/model-connections/test
 POST   /api/files
+POST   /api/research-sessions
+GET    /api/research-sessions
+GET    /api/research-sessions/{id}
+POST   /api/research-sessions/{id}/messages
+POST   /api/research-sessions/{id}/model-session
+GET    /api/research-sessions/{id}/events
+GET    /api/research-sessions/{id}/sources/{file_id}
+GET    /api/research-sessions/{id}/export?format=json|html
 POST   /api/runs
 GET    /api/runs
 GET    /api/capabilities
@@ -189,6 +247,8 @@ POST   /api/runs/{id}/resume
 ```
 
 reviews 保存更正为新版本，返回其 run_id；resume 启动该版本。revisions 的 POST 则创建版本并安排执行。对话触发修改时，回复的 related_run_id 指向新版本，前端应切换订阅。
+
+新版研究 `messages` 接收文字、文件 ID，或 `question_id + option_id`。确认只作用于当前问题，过期选择返回 409；文字修改不会自动确认。`events?after=<序号>` 支持增量获取，Web 当前在处理期间轮询会话快照。研究会话使用逐次修订与事件记录，不套用估值任务的重算版本机制。
 
 `POST /api/runs/{id}/model-session` 接收 `{"model_session_id":"…"}`，为已有任务附加临时模型会话。不会执行或修改估值；执行中的任务返回 409，未知会话返回 404。
 

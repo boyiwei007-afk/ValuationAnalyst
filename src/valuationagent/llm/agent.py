@@ -5,12 +5,12 @@ from valuationagent.llm.client import LlmError
 
 
 def run_tool_loop(
-    llm, messages: list[dict], registry: ToolRegistry, call: Callable, *, max_rounds=6
+    llm, messages: list[dict], registry: ToolRegistry, call: Callable, *, max_rounds=6, max_tokens=900
 ):
     """Finite tool loop. Free text is never interpreted as a command or valuation."""
     messages = list(messages)
     for _ in range(max_rounds):
-        reply = llm.chat(messages, tools=registry.schemas(), tool_choice="required")
+        reply = llm.chat(messages, tools=registry.schemas(), tool_choice="required", max_tokens=max_tokens)
         calls = reply.get("tool_calls") or []
         if len(calls) != 1:
             messages.append(
@@ -30,7 +30,7 @@ def run_tool_loop(
             raise LlmError("TOOL_ARGUMENTS_TOO_LARGE: 工具参数过长。")
         clean = {
             "role": "assistant",
-            "content": None,
+            "content": reply.get("content") if isinstance(reply.get("content"), str) else None,
             "tool_calls": [
                 {
                     "id": item["id"],
@@ -42,6 +42,10 @@ def run_tool_loop(
                 }
             ],
         }
+        # Required by providers that use reasoning with tools. It stays only in
+        # this in-memory protocol history, never in tool events or UI messages.
+        if isinstance(reply.get("reasoning_content"), str):
+            clean["reasoning_content"] = reply["reasoning_content"]
         messages.append(clean)
         try:
             result = call(

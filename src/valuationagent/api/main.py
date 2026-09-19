@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.sse import EventSourceResponse
 
 from valuationagent.application.runner import ValuationRunner
+from valuationagent.application.research import ResearchService
+from valuationagent.api.research import register_research_routes
 from valuationagent.finance.reference import ReferenceFinancialModel
 from valuationagent.llm.client import (
     LlmError,
@@ -85,6 +87,8 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
     app.state.store = store
     app.state.runner = runner
     app.state.sessions = sessions
+    app.state.research = ResearchService(store)
+    register_research_routes(app, app.state.research, sessions)
 
     def execute_background(run_id):
         try:
@@ -118,6 +122,10 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
     @app.get("/api/capabilities", response_model=list[Capability])
     def capabilities() -> list[Capability]:
         return [
+            Capability(capability_id="research_sessions", available=True,
+                       detail="资料不完整也能开始研究；选项与文字复核、来源、恢复及研究报告"),
+            Capability(capability_id="research_document_parsing", available=True,
+                       detail="研究会话读取文本 PDF、XLSX、CSV、JSON、TXT；语义抽取需要模型，OCR 待接入"),
             Capability(
                 capability_id="structured_financial_input",
                 available=True,
@@ -164,6 +172,16 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
                 detail="受限工具调用循环，要求模型支持 function calling",
             ),
             Capability(
+                capability_id="agent_application_contracts",
+                available=True,
+                detail="意图、上下文、证据、搜索查询、政策卡片和导出产物契约已冻结",
+            ),
+            Capability(
+                capability_id="search_provider_contract",
+                available=True,
+                detail="已提供零网络 mock 与未配置状态；真实搜索 provider 待接入",
+            ),
+            Capability(
                 capability_id="ticker_data_provider",
                 available=False,
                 detail="A 股数据源适配器待接入",
@@ -171,7 +189,7 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
             Capability(
                 capability_id="pdf_excel_extraction",
                 available=False,
-                detail="文件接收已实现，财务解析待接入",
+                detail="原有估值上传路径仍需标准 JSON；研究会话已支持原文读取和候选字段提取",
             ),
             Capability(
                 capability_id="pdf_excel_reporting",
