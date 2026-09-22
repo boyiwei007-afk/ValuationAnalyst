@@ -1,5 +1,7 @@
 from __future__ import annotations
+import json
 from typing import Callable
+from pydantic import ValidationError
 from valuationagent.core.tools import ToolRegistry, canonical
 from valuationagent.llm.client import LlmError
 
@@ -7,16 +9,25 @@ from valuationagent.llm.client import LlmError
 def run_tool_loop(
     llm, messages: list[dict], registry: ToolRegistry, call: Callable, *, max_rounds=6, max_tokens=900
 ):
-    """Finite tool loop. Free text is never interpreted as a command or valuation."""
+    """Finite, auditable tool loop with bounded self-correction.
+
+    Free text is never interpreted as a command or valuation. Tool failures are
+    returned to the model as safe structured feedback; repeated no-progress
+    failures stop and let the application ask the user how to recover.
+    """
     messages = list(messages)
-    for _ in range(max_rounds):
+    trace = {"rounds": 0, "tools": [], "tool_errors": 0, "protocol_errors": 0}
+    failed_signatures: dict[str, int] = {}
+    for round_index in range(1, max_rounds + 1):
+        trace["rounds"] = round_index
         reply = llm.chat(messages, tools=registry.schemas(), tool_choice="required", max_tokens=max_tokens)
         calls = reply.get("tool_calls") or []
         if len(calls) != 1:
+            trace["protocol_errors"] += 1
             messages.append(
                 {
                     "role": "user",
-                    "content": "请只调用一个已注册工具；纯文本不能提交任务。",
+                    "content": "协议错误：本轮必须且只能调用一个已注册工具。请根据工具 schema 重新提交；纯文本不能改变任务或产生正式结果。",
                 }
             )
             continue
@@ -47,19 +58,52 @@ def run_tool_loop(
         if isinstance(reply.get("reasoning_content"), str):
             clean["reasoning_content"] = reply["reasoning_content"]
         messages.append(clean)
+        tool_name = fn.get("name", "")
+        trace["tools"].append(tool_name)
         try:
             result = call(
-                fn.get("name", ""),
+                tool_name,
                 fn["arguments"],
-                lambda: registry.invoke(fn.get("name", ""), fn["arguments"]),
+                lambda: registry.invoke(tool_name, fn["arguments"]),
             )
-        except ValueError:
+        except ValidationError as exc:
+            trace["tool_errors"] += 1
+            fields = [".".join(str(part) for part in error["loc"]) for error in exc.errors(include_input=False)]
             result = {
-                "error": "工具参数或前置条件不满足，请检查工具 schema 和此前结果。"
+                "ok": False,
+                "error": {
+                    "code": "TOOL_ARGUMENTS_INVALID",
+                    "message": "工具参数不符合 schema，请修正字段后重试。",
+                    "fields": fields[:12],
+                    "recoverable": True,
+                },
+            }
+        except ValueError as exc:
+            trace["tool_errors"] += 1
+            message = str(exc).strip()[:1000] or "工具前置条件不满足。"
+            result = {
+                "ok": False,
+                "error": {
+                    "code": "TOOL_PRECONDITION_FAILED",
+                    "message": message,
+                    "recoverable": True,
+                },
             }
         messages.append(
             {"role": "tool", "tool_call_id": item["id"], "content": canonical(result)}
         )
         if isinstance(result, dict) and result.get("_terminal"):
-            return result
+            terminal = dict(result)
+            terminal["_agent_trace"] = trace
+            return terminal
+        if isinstance(result, dict) and result.get("ok") is False:
+            try:
+                signature = tool_name + ":" + canonical(json.loads(fn["arguments"]))
+            except (TypeError, ValueError):
+                signature = tool_name + ":invalid-json"
+            failed_signatures[signature] = failed_signatures.get(signature, 0) + 1
+            if failed_signatures[signature] >= 2:
+                raise LlmError(
+                    "AGENT_NO_PROGRESS: 同一工具调用连续失败，已停止自动重试并保留当前进度。"
+                )
     raise LlmError("AGENT_STEP_LIMIT: 未在限定步骤内提交有效决策，请复核后重试。")

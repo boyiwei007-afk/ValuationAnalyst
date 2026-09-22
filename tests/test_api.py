@@ -68,6 +68,9 @@ def test_capabilities_are_honest_about_unimplemented_adapters(tmp_path):
             for item in client.get("/api/capabilities").json()
         }
     assert capabilities["structured_financial_input"]["available"] is True
+    assert capabilities["durable_conversation_context"]["available"] is True
+    assert capabilities["interactive_agent_recovery"]["available"] is True
+    assert capabilities["agent_tool_extensions"]["available"] is True
     assert capabilities["ticker_data_provider"]["available"] is False
     assert capabilities["pdf_excel_extraction"]["available"] is False
 

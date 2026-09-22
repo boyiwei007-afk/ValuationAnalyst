@@ -172,6 +172,21 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
                 detail="受限工具调用循环，要求模型支持 function calling",
             ),
             Capability(
+                capability_id="durable_conversation_context",
+                available=True,
+                detail="权威任务状态、可见长期记忆、近期对话与按需证据组成分层上下文",
+            ),
+            Capability(
+                capability_id="interactive_agent_recovery",
+                available=True,
+                detail="模型、工具和文件异常保存进度并返回可操作的恢复选项",
+            ),
+            Capability(
+                capability_id="agent_tool_extensions",
+                available=True,
+                detail="AgentToolProvider 可注册金融与数据工具，并复用统一参数校验和审计事件",
+            ),
+            Capability(
                 capability_id="agent_application_contracts",
                 available=True,
                 detail="意图、上下文、证据、搜索查询、政策卡片和导出产物契约已冻结",

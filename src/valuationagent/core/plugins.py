@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from valuationagent.core.tools import ToolSpec
 from valuationagent.schemas.models import (
     AssumptionSet,
     DcfResult,
@@ -14,6 +15,19 @@ from valuationagent.schemas.models import (
     ValidationFinding,
     ValuationRequest,
 )
+
+
+class AgentToolProvider(Protocol):
+    """Adds allowlisted tools to the research Agent without changing its loop.
+
+    Providers own their dependencies and return typed ``ToolSpec`` objects.
+    Every invocation is still wrapped by the application event/audit layer.
+    """
+
+    provider_id: str
+    version: str
+
+    def tool_specs(self, session: Any) -> list[ToolSpec]: ...
 
 
 class FinancialModelPlugin(Protocol):

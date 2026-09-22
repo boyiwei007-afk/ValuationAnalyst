@@ -2,6 +2,8 @@
 
 可追溯的估值 Agent、交互式命令行与网页研究工作台。CLI 和 Web 共用任务、金融插件、版本、对话与执行事件。
 
+Agent 以 LLM 负责意图理解、规划、工具选择和结果解释，以确定性程序负责数据校验与金融计算；长期上下文、异常恢复、来源引用和工具轨迹均可检查。完整机制见[Agent 工作机制与完整流程](docs/ValuationAgent_Agent工作机制与流程.md)。
+
 ## 启动
 
 在项目目录打开 PowerShell：
@@ -44,6 +46,7 @@ CLI 和网页默认打开资料研究对话，不要求用户一开始就提供�
 提取这份资料中的营业收入，保留出处，缺失信息不要猜。
 /confirm
 /files
+/memory
 /tools
 /prepare
 /export json

@@ -189,7 +189,7 @@ def launch_research(language=None, session_id=None):
                     content = text_input("Your requirements" if en else "补充或修改要求")
                     if not content.strip():
                         continue
-                    payload = ResearchTurn(content=content)
+                    payload = ResearchTurn(content=content, question_id=question.question_id)
                 else:
                     continue
             else:
@@ -208,7 +208,7 @@ def launch_research(language=None, session_id=None):
                     break
                 if content == "/help":
                     console.print(getting_started(language))
-                    console.print(Text("/upload 路径 · /files · /tools · /confirm · /connect · /prepare\n/company 名称 · /date YYYY-MM-DD · /methods dcf,pe\n/export json|html · /wizard · /demo · /quit", style="muted"))
+                    console.print(Text("/upload 路径 · /files · /memory · /tools · /confirm · /connect · /prepare\n/company 名称 · /date YYYY-MM-DD · /methods dcf,pe\n/export json|html · /wizard · /demo · /quit", style="muted"))
                     continue
                 if content == "/confirm":
                     seen_question = None
@@ -244,8 +244,14 @@ def launch_research(language=None, session_id=None):
                     continue
                 if content == "/tools":
                     for event in store.list_events(session_id):
-                        if event.tool:
-                            console.print(Text(f"{event.sequence} · {event.type} · {event.tool} · {event.duration_ms or 0} ms · {event.summary}"))
+                        if event.tool or event.type.startswith(("agent.", "intent.", "memory.", "security.")):
+                            console.print(Text(f"{event.sequence} · {event.type} · {event.tool or '-'} · {event.duration_ms or 0} ms · {event.summary}"))
+                    continue
+                if content == "/memory":
+                    if not session.memory:
+                        console.print(Text("No durable context saved." if en else "尚未保存长期上下文。", style="muted"))
+                    for item in session.memory:
+                        console.print(panel(Text(f"{item.content}\n{item.source_message_id}", style="muted"), f"{item.kind} · {item.key}"))
                     continue
                 if content.startswith("/export"):
                     format = content.partition(" ")[2].strip() or "json"

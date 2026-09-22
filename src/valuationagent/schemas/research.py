@@ -1,7 +1,7 @@
 """Research can start with incomplete material; confirmed valuation inputs stay strict."""
 
 from datetime import date, datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from pydantic import Field, model_validator
 from valuationagent.schemas.models import ApiModel, Language
 
@@ -20,9 +20,32 @@ class ResearchChoice(ApiModel):
     description: str = Field(default="", max_length=400)
 
 
+class ResearchMemoryItem(ApiModel):
+    """Durable conversational context; never a substitute for financial facts."""
+
+    key: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_.:-]+$")
+    kind: Literal["goal", "preference", "constraint", "decision", "definition"]
+    content: str = Field(min_length=1, max_length=600)
+    source_message_id: str = Field(default="", max_length=120)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ResearchIssue(ApiModel):
+    """Latest recoverable interruption shown to the user and audit trail."""
+
+    issue_id: str
+    code: str = Field(min_length=1, max_length=100)
+    stage: Literal["model", "tool", "document", "input", "agent", "unknown"]
+    message: str = Field(min_length=1, max_length=1200)
+    retryable: bool = True
+    status: Literal["open", "retrying", "resolved", "deferred"] = "open"
+    context: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ResearchQuestion(ApiModel):
     question_id: str
-    kind: Literal["task", "facts", "clarification", "search_unavailable"]
+    kind: Literal["task", "facts", "clarification", "search_unavailable", "recovery"]
     title: str = Field(min_length=1, max_length=600)
     options: list[ResearchChoice] = Field(min_length=1, max_length=4)
     fact_ids: list[str] = Field(default_factory=list)
@@ -51,6 +74,8 @@ class DocumentSummary(ApiModel):
     name: str
     role: str
     block_count: int
+    sha256: str = Field(default="", max_length=64)
+    size_bytes: int = Field(default=0, ge=0)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -64,8 +89,14 @@ class ResearchSession(ApiModel):
     documents: list[DocumentSummary] = Field(default_factory=list)
     facts: list[FactCandidate] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
+    memory: list[ResearchMemoryItem] = Field(default_factory=list, max_length=80)
     question: ResearchQuestion | None = None
+    last_issue: ResearchIssue | None = None
     summary: str = ""
+    agent_protocol_version: str = "research-agent-v2"
+    prompt_version: str = "research-2026-09-22"
+    model_provider: str = ""
+    model_name: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

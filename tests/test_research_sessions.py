@@ -11,7 +11,8 @@ from valuationagent.application.research import ResearchService
 from valuationagent.application.research_export import build_research_export
 from valuationagent.cli.main import app, interactive
 from valuationagent.core.documents import parse_document
-from valuationagent.llm.client import OpenAICompatibleClient
+from valuationagent.core.tools import NoArguments, ToolSpec
+from valuationagent.llm.client import LlmError, OpenAICompatibleClient
 from valuationagent.schemas.models import ModelConnectionInput
 from valuationagent.schemas.research import ResearchTurn
 from valuationagent.storage.sqlite import SQLiteRunStore
@@ -70,6 +71,22 @@ def test_text_corrections_cannot_accept_old_values(service):
     assert service.store.get_research(session.session_id).draft.company == ""
 
 
+def test_free_text_supersedes_the_exact_question_without_accepting_it(service):
+    session = service.create()
+    first = service.turn(session.session_id, ResearchTurn(content="/company 旧名称"))
+    old_question = first["session"]["question"]
+    state = service.turn(session.session_id, ResearchTurn(
+        content="/company 新名称", question_id=old_question["question_id"]
+    ))
+    assert state["session"]["draft"]["company"] == ""
+    assert state["session"]["question"]["question_id"] != old_question["question_id"]
+    assert state["session"]["question"]["proposed_draft"]["company"] == "新名称"
+    with pytest.raises(ValueError, match="失效"):
+        service.turn(session.session_id, ResearchTurn(
+            question_id=old_question["question_id"], option_id="accept"
+        ))
+
+
 def test_file_llm_tool_evidence_and_confirmation_survive_restart(service):
     fid = upload(service.store)
     model = ScriptedModel([("read_document", {"file_id": fid}), ("propose_facts", {"candidates": [candidate(fid)]})])
@@ -78,6 +95,7 @@ def test_file_llm_tool_evidence_and_confirmation_survive_restart(service):
     fact = state["session"]["facts"][0]
     assert fact["status"] == "proposed" and fact["normalized_value"] == "120000000"
     assert state["session"]["documents"][0]["block_count"] == 1
+    assert len(state["session"]["documents"][0]["sha256"]) == 64
     assert "PRIVATE_TEST_REASONING" not in json.dumps(state)
     # Reasoning survives only within the ephemeral protocol loop.
     assert any(m.get("reasoning_content") == "PRIVATE_TEST_REASONING" for m in model.calls[-1])
@@ -87,6 +105,107 @@ def test_file_llm_tool_evidence_and_confirmation_survive_restart(service):
     assert state["session"]["facts"][0]["status"] == "confirmed"
     assert fresh.store.research_blocks(session.session_id, fid)[0]["text"] == fact["quote"]
     assert "正式金融模型" in build_research_export(fresh, session.session_id, "html")[0]
+
+
+def test_long_conversation_keeps_explicit_durable_memory_after_restart(service):
+    first = ScriptedModel([
+        ("update_memory", {
+            "updates": [{
+                "key": "scope.statement_basis",
+                "kind": "constraint",
+                "content": "本任务后续分析统一采用合并报表口径；发现母公司口径时先询问用户。",
+            }],
+        }),
+        ("finish_response", {
+            "answer": "已记住本任务统一采用合并口径。",
+        }),
+    ])
+    session = service.create(llm=first)
+    service.turn(session.session_id, ResearchTurn(content="后续统一采用合并口径，遇到母公司口径先问我。"))
+    for index in range(30):
+        service.store.add_message(session.session_id, "user", f"临时讨论 {index}", "research")
+        service.store.add_message(session.session_id, "assistant", f"临时回复 {index}", "research")
+
+    fresh = ResearchService(SQLiteRunStore(service.store.data_dir))
+    second = ScriptedModel([("finish_response", {"answer": "我会继续遵循已保存口径。"})])
+    fresh.attach(session.session_id, second)
+    state = fresh.turn(session.session_id, ResearchTurn(content="继续之前的任务"))
+
+    system_prompt = second.calls[0][0]["content"]
+    assert "scope.statement_basis" in system_prompt
+    assert "统一采用合并报表口径" in system_prompt
+    assert state["session"]["memory"][0]["source_message_id"].startswith("msg_")
+
+
+def test_credentials_are_redacted_from_messages_memory_and_tool_events(service):
+    secret = "sk-testsecret1234567890"
+    model = ScriptedModel([("finish_response", {
+        "answer": f"不会保存 {secret}",
+        "memory_updates": [{
+            "key": "preference.secret",
+            "kind": "preference",
+            "content": secret,
+        }],
+    })])
+    session = service.create(llm=model)
+    state = service.turn(session.session_id, ResearchTurn(content=f"请记住 {secret}"))
+    serialized = json.dumps(state, ensure_ascii=False)
+    assert secret not in serialized
+    assert "REDACTED_CREDENTIAL" in serialized
+    assert state["session"]["memory"] == []
+    assert any(event["type"] == "security.credential_redacted" for event in state["events"])
+
+
+def test_model_failure_becomes_recoverable_user_choice(service):
+    class FailingModel:
+        def chat(self, messages, **kwargs):
+            raise LlmError("LLM_HTTP_503: 供应商暂时不可用，请稍后恢复。")
+
+    session = service.create(llm=FailingModel())
+    state = service.turn(session.session_id, ResearchTurn(content="继续整理资料"))
+    question = state["session"]["question"]
+    assert question["kind"] == "recovery"
+    assert {item["id"] for item in question["options"]} >= {"retry", "revise", "defer"}
+    assert state["session"]["last_issue"]["code"] == "LLM_HTTP_503"
+    assert "没有继续猜测" in state["messages"][-1]["content"]
+    assert any(event["type"] == "agent.recovery_required" for event in state["events"])
+
+    service.attach(session.session_id, ScriptedModel([("finish_response", {"answer": "重试成功，已从原上下文继续。"})]))
+    state = service.turn(session.session_id, ResearchTurn(
+        question_id=question["question_id"], option_id="retry"
+    ))
+    assert state["session"]["question"] is None
+    assert state["session"]["last_issue"]["status"] == "resolved"
+    assert "重试成功" in state["messages"][-1]["content"]
+
+
+def test_registered_tool_provider_joins_same_audit_loop(tmp_path):
+    class FinanceProbeProvider:
+        provider_id = "finance-probe"
+        version = "test-1"
+
+        def tool_specs(self, session):
+            return [ToolSpec(
+                "inspect_finance_contract",
+                "读取未来金融插件的能力契约，不执行估值。",
+                NoArguments,
+                lambda _: {"available": False, "reason": "正式模型待接入"},
+            )]
+
+    model = ScriptedModel([
+        ("inspect_finance_contract", {}),
+        ("finish_response", {"answer": "已检查金融插件契约；正式模型仍待接入。"}),
+    ])
+    service = ResearchService(
+        SQLiteRunStore(tmp_path / "provider-runtime"),
+        tool_providers=[FinanceProbeProvider()],
+    )
+    session = service.create(llm=model)
+    state = service.turn(session.session_id, ResearchTurn(content="检查金融工具是否可用"))
+    completed = [event for event in state["events"] if event["type"] == "tool.completed"]
+    assert any(event["tool"] == "inspect_finance_contract" for event in completed)
+    agent_start = next(event for event in state["events"] if event["type"] == "agent.started")
+    assert agent_start["payload"]["tool_extensions"][0]["provider_id"] == "finance-probe"
 
 
 def test_invented_number_is_rejected_and_tool_feedback_reaches_model(service):
@@ -101,6 +220,21 @@ def test_invented_number_is_rejected_and_tool_feedback_reaches_model(service):
     assert result["session"]["facts"] == []
     assert any(e["type"] == "tool.failed" for e in result["events"])
     assert "原文不支持" in result["messages"][-1]["content"]
+
+
+def test_repeated_identical_tool_failure_stops_and_asks_user(service):
+    fid = upload(service.store)
+    invalid = {"candidates": [candidate(fid, raw_value="999999")]}
+    model = ScriptedModel([
+        ("propose_facts", invalid),
+        ("propose_facts", invalid),
+    ])
+    session = service.create(llm=model)
+    state = service.turn(session.session_id, ResearchTurn(content="提取", file_ids=[fid]))
+    assert state["session"]["facts"] == []
+    assert state["session"]["last_issue"]["code"] == "AGENT_NO_PROGRESS"
+    assert state["session"]["question"]["kind"] == "recovery"
+    assert any(event["type"] == "tool.failed" for event in state["events"])
 
 
 def test_uncertain_fields_are_not_blanket_confirmed(service):
@@ -164,6 +298,28 @@ def test_search_gap_does_not_fabricate_peers(service):
     assert result["session"]["question"]["kind"] == "search_unavailable"
     assert result["session"]["facts"] == []
     assert "没有发出网络请求" in result["messages"][-1]["content"]
+
+
+def test_llm_receives_source_ambiguity_contract_and_free_text_guidance(service):
+    model = ScriptedModel([("finish_response", {
+        "answer": "表头中的 2024 与相邻页的 2023 无法可靠对应，暂未提取该列。",
+        "question": "这列应按哪个报告期处理？",
+        "options": ["按表头原样保留为 2024", "暂不采用这列，等待补充资料"],
+    })])
+    session = service.create(llm=model)
+    result = service.turn(session.session_id, ResearchTurn(content="请提取这份表格"))
+
+    system_prompt = model.calls[0][0]["content"]
+    assert "不得静默修正或合理化" in system_prompt
+    assert "不得把数值平移到相邻年份" in system_prompt
+    assert "实际发现了什么" in system_prompt
+    assert "用户可以直接输入补充或修改要求" in system_prompt
+    assert result["session"]["question"]["kind"] == "clarification"
+    assert [option["label"] for option in result["session"]["question"]["options"]] == [
+        "按表头原样保留为 2024",
+        "暂不采用这列，等待补充资料",
+    ]
+    assert "直接输入你的判断" in result["messages"][-1]["content"]
 
 
 def test_excel_locations_and_formulas_are_not_executed(service):
