@@ -129,3 +129,28 @@ def test_web_conversation_revision_charts_and_export_contract(tmp_path):
         assert record["request"]["language"] == "en-US"
         assert record["parent_run_id"] == rid
         assert len(client.get(f"/api/runs/{child}/revisions").json()) == 2
+
+
+def test_research_report_preserves_summary_pending_review_and_escaped_text(tmp_path):
+    from valuationagent.schemas.research import ResearchChoice, ResearchQuestion
+
+    app = create_app(tmp_path)
+    session = app.state.research.create()
+    session.summary = "资料摘要 <script>alert(1)</script>"
+    session.question = ResearchQuestion(
+        question_id="review_test", kind="clarification", title="确认 <行业口径>",
+        options=[ResearchChoice(id="confirm", label="使用 <合并口径>", description="保留 & 原文依据")],
+    )
+    app.state.store.save_research(session)
+    with TestClient(app) as client:
+        response = client.get(f"/api/research-sessions/{session.session_id}/export?format=html")
+        assert response.status_code == 200
+        assert response.headers["content-disposition"].endswith('.html"')
+        assert "资料摘要 &lt;script&gt;" in response.text
+        assert "确认 &lt;行业口径&gt;" in response.text
+        assert "使用 &lt;合并口径&gt;" in response.text
+        assert "保留 &amp; 原文依据" in response.text
+        assert '<script>' not in response.text
+        assert 'name="viewport"' in response.text
+        assert 'class="table-scroll"' in response.text
+        assert client.get(f"/api/research-sessions/{session.session_id}/export?format=pdf").status_code == 422

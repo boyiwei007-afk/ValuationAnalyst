@@ -1,7 +1,12 @@
 const base = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 export async function api(path, options = {}) {
-  const response = await fetch(base + path, { ...options, headers: { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...options.headers } })
+  let response
+  try {
+    response = await fetch(base + path, { ...options, headers: { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...options.headers } })
+  } catch {
+    throw new Error('连接中断，请检查服务后重试；未发送内容已保留。 / Connection interrupted. Check the service and retry; your draft is preserved.')
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => null)
     const detail = body?.detail

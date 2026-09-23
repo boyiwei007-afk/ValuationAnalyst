@@ -13,7 +13,7 @@ from valuationagent.core.documents import parse_document
 from valuationagent.core.tools import NoArguments, ToolRegistry, ToolSpec, canonical
 from valuationagent.llm.agent import run_tool_loop
 from valuationagent.llm.client import LlmError
-from valuationagent.llm.context import RESEARCH_PROMPT_VERSION, research_context
+from valuationagent.llm.context import RESEARCH_PROMPT_VERSION, research_context, research_snapshot
 from valuationagent.llm.intent import interpret_intent
 from valuationagent.search.providers import UnavailableSearchProvider
 from valuationagent.schemas.agent import SearchQuery
@@ -30,6 +30,13 @@ class ReadDocument(ApiModel):
     query: str = Field(default="", max_length=200)
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=6, ge=1, le=8)
+
+
+class InspectContext(ApiModel):
+    section: Literal["overview", "facts", "memory", "documents", "user_notes"] = "overview"
+    query: str = Field(default="", max_length=200, description="按关键词或 ID 查找历史字段、记忆或用户原话。")
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=8, ge=1, le=20)
 
 
 class ProposeTask(ApiModel):
@@ -217,6 +224,7 @@ class ResearchService:
                 "events": [e.model_dump(mode="json") for e in self.store.list_events(session_id)]}
 
     def _say(self, session, content):
+        content = self._redact_text(content)
         self.store.add_message(session.session_id, "assistant", content, "research")
         self.store.append_event(session.session_id, type="conversation.message", stage="research", summary=content, status="completed")
 
@@ -234,13 +242,18 @@ class ResearchService:
                           for item in exc.errors(include_input=False)]
                 message = "工具参数不符合约束" + ("：" + "、".join(fields[:12]) if fields else "。")
             elif isinstance(exc, (ValueError, LlmError)):
-                message = str(exc)[:1200]
+                message = self._redact_text(str(exc))[:1200]
             else:
                 message = "文件或工具处理失败，请检查资料后重试。"
             self.store.append_event(session.session_id, type="tool.failed", stage="research", tool=name,
                 tool_call_id=call_id, status="failed", summary=message,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 payload={"error_type": exc.__class__.__name__})
+            # The same safe error also goes back to the model for correction.
+            if isinstance(exc, LlmError):
+                raise LlmError(message) from None
+            if isinstance(exc, ValueError) and not isinstance(exc, ValidationError):
+                raise ValueError(message) from None
             raise
         self.store.append_event(session.session_id, type="tool.completed", stage="research", tool=name,
             tool_call_id=call_id, status="completed", summary=name,
@@ -250,8 +263,9 @@ class ResearchService:
         return self._redact_value(result)
 
     def _question(self, session, kind, title, choices, **kwargs):
+        title = self._redact_text(title)
         session.question = ResearchQuestion(question_id=_id("question_"), kind=kind, title=title,
-            options=[ResearchChoice(id=key, label=label) for key, label in choices], **kwargs)
+            options=[ResearchChoice(id=key, label=self._redact_text(label)) for key, label in choices], **kwargs)
         session.status = "waiting_confirmation"
         self.store.append_event(session.session_id, type="review.required", stage="research", status="waiting_confirmation",
                                 summary=title, payload={"question_id": session.question.question_id})
@@ -312,7 +326,7 @@ class ResearchService:
         return {"updated": changed, "removed": removed, "rejected": rejected}
 
     def _recover(self, session, exc, stage="unknown", context=None):
-        raw = str(exc).strip()
+        raw = self._redact_text(str(exc)).strip()
         match = re.match(r"([A-Z][A-Z0-9_]+):", raw)
         code = match.group(1) if match else (
             "DOCUMENT_PROCESSING_FAILED" if stage == "document" else
@@ -332,7 +346,7 @@ class ResearchService:
             stage=stage,
             message=message,
             retryable=retryable,
-            context=context or {},
+            context=self._redact_value(context or {}),
         )
         session.last_issue = issue
         if code in {"LLM_HTTP_401", "LLM_HTTP_403", "MODEL_SESSION_REVOKED", "MODEL_CONNECTION_REQUIRED"}:
@@ -413,7 +427,9 @@ class ResearchService:
                 raise ValueError("候选字段必须引用当前资料中的连续原文。")
             clean_value = re.sub(r"[,，\s]", "", item.raw_value).replace("−", "-")
             quoted = re.sub(r"[,，\s]", "", item.quote).replace("−", "-")
-            if not re.search(r"(?<![\d.])" + re.escape(clean_value) + r"(?![\d.])", quoted):
+            # A positive candidate must not match the numeric suffix of a
+            # negative source value (e.g. 12000 inside -12000).
+            if not re.search(r"(?<![\d.+-])" + re.escape(clean_value) + r"(?![\d.])", quoted):
                 raise ValueError("候选数值未出现在引用原文中，请保留原始数值。")
             fact = FactCandidate(**item.model_dump(), fact_id=_id("fact_"))
             if item.block_id.startswith("message:"):
@@ -536,6 +552,48 @@ class ResearchService:
             "\nThe financial model is not connected. This is a preparation check, not full financial validation or a valuation.")}
 
     def _llm_turn(self, session, llm, intent=None):
+        session.prompt_version = RESEARCH_PROMPT_VERSION
+
+        def inspect(args):
+            messages = self.store.list_messages(session.session_id)
+            if args.section == "overview":
+                snapshot = research_snapshot(session, messages)
+                return {
+                    **snapshot.task_state,
+                    "session_id": session.session_id,
+                    "revision": session.revision,
+                    "summary": session.summary,
+                    "user_notes": [
+                        {"block_id": "message:" + message.message_id,
+                         "text": message.content,
+                         "location": {"message_id": message.message_id, "source_type": "user_note"}}
+                        for message in messages if message.role == "user"
+                    ][-2:],
+                    "retrieval": "使用 section、query、offset、limit 检索完整历史；按 next_offset 继续分页。",
+                }
+            if args.section == "user_notes":
+                rows = [
+                    {"block_id": "message:" + message.message_id,
+                     "text": message.content,
+                     "location": {"message_id": message.message_id, "source_type": "user_note"}}
+                    for message in messages if message.role == "user"
+                ]
+            else:
+                rows = [item.model_dump(mode="json") for item in getattr(session, args.section)]
+            if args.query:
+                needle = args.query.casefold()
+                rows = [row for row in rows if needle in canonical(row).casefold()]
+            page, used = [], 0
+            for row in rows[args.offset:args.offset + args.limit]:
+                size = len(canonical(row))
+                if page and used + size > 24000:
+                    break
+                page.append(row)
+                used += size
+            end = args.offset + len(page)
+            return {"section": args.section, "total": len(rows), "offset": args.offset,
+                    "items": page, "next_offset": end if end < len(rows) else None}
+
         def gaps(args):
             session.gaps = list(dict.fromkeys(args.missing))
             return {"missing": session.gaps, "reason": args.reason}
@@ -604,8 +662,7 @@ class ResearchService:
             return result.model_dump(mode="json")
 
         base_specs = [
-            ToolSpec("inspect_context", "读取已确认研究范围、资料清单、候选字段和待处理问题。", NoArguments,
-                     lambda _: {**session.model_dump(mode="json"), "user_notes": [b for b in self._blocks(session).values() if b["block_id"].startswith("message:")][-8:]}),
+            ToolSpec("inspect_context", "读取有界任务摘要，或按 section、query、offset、limit 分页检索事实、长期记忆、文件清单及早期用户原话；返回 next_offset 时可继续读取。", InspectContext, inspect),
             ToolSpec("read_document", "读取当前会话已上传文件的原文块；支持关键词和分页，返回可引用 block_id。遇到表格时应同时读取标题、表头、单位、相邻行和注释，不能凭单个单元格判断字段或年份。", ReadDocument, read),
             ToolSpec("propose_task", "根据用户明确意图提出完整研究设置，等待用户确认；不是直接修改。", ProposeTask,
                      lambda args: self._propose_task(session, args.draft)),
@@ -675,7 +732,7 @@ class ResearchService:
                 type="agent.failed",
                 stage="planning",
                 status="failed",
-                summary=str(exc)[:500] if isinstance(exc, (ValueError, LlmError)) else "Agent 执行失败",
+                summary=self._redact_text(str(exc))[:500] if isinstance(exc, (ValueError, LlmError)) else "Agent 执行失败",
                 payload={"prompt_version": RESEARCH_PROMPT_VERSION, "context_sha256": context_hash},
             )
             raise
@@ -750,7 +807,7 @@ class ResearchService:
                     session_id, type="security.credential_redacted", stage="input",
                     status="completed", summary="疑似凭证已从对话内容中移除",
                 )
-            answered_question = None
+            answered_question = pending_question.model_dump(mode="json") if turn.option_id else None
             if (
                 turn.content.strip()
                 and pending_question
@@ -784,6 +841,7 @@ class ResearchService:
             planning_hint = {
                 "classification": intent.model_dump(mode="json"),
                 "answered_question": answered_question,
+                "selected_option_id": turn.option_id,
             }
             self.store.append_event(
                 session_id,
@@ -839,7 +897,7 @@ class ResearchService:
                     raise LlmError("MODEL_CONNECTION_REQUIRED: 会话已保存，请重新连接模型后继续。")
                 else:
                     result = self._offline(session, content)
-                if retry_requested or (answered_question and question_kind == "recovery"):
+                if retry_requested or (answered_question and question_kind == "recovery" and not turn.option_id):
                     self._resolve_issue(session)
                 self._say(session, result["answer"])
                 self.store.append_event(session_id, type="turn.completed", stage="research", status="completed", summary="本轮研究已保存")

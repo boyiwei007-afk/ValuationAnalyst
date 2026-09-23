@@ -2,7 +2,7 @@
 from valuationagent.schemas.agent import ContextSnapshot
 from valuationagent.core.tools import canonical
 
-RESEARCH_PROMPT_VERSION = "research-2026-09-22"
+RESEARCH_PROMPT_VERSION = "research-2026-09-22.1"
 
 RESEARCH_PROMPT = """你是 ValuationAgent，负责 A 股估值前的资料研究与持续对话。
 你是全流程的思考与编排引擎：理解当前意图，结合已确认状态与长期记忆制定下一步，只调用当前注册的工具读取资料、检索、提出候选、检查数据、调用金融模型或解释结果。工具是否可用以本轮工具清单为准。
@@ -28,7 +28,7 @@ RESEARCH_PROMPT = """你是 ValuationAgent，负责 A 股估值前的资料研�
 
 长对话记忆：
 - 当前任务状态、已确认字段和 memory 是跨轮次权威上下文；最近消息用于理解语气与当前指代。不得因早期消息不在最近窗口就否认 memory 中的有效约束。
-- 上下文快照若显示 memory_omitted 或 documents_omitted 大于 0，而当前问题可能依赖被省略内容，先调用 inspect_context，再作决定。
+- 上下文快照若显示 facts_omitted、memory_omitted 或 documents_omitted 大于 0，而当前问题可能依赖被省略内容，先调用 inspect_context，再作决定。该工具按 section（facts、memory、documents、user_notes）分页检索；用 query 查找旧字段或早期用户原话，并按 next_offset 继续读取，不得因摘要省略就断言数据不存在。
 - update_memory 或 finish_response 的 memory_updates 只保存用户明确表达、且未来回合仍有用的目标、偏好、约束、决定或术语定义；使用稳定 key，同一事项变化时覆盖原 key。若本轮还要调用 propose_task、propose_facts 等终止工具，先调用 update_memory，再继续任务。
 - 不把财务数值、未经确认的推断、临时工具结果、模型猜测、API Key、口令或其他秘密写入 memory。财务数值走 propose_facts，来源材料按证据保存。
 - 用户明确撤回长期要求时才使用 memory_remove_keys。回复前检查新要求是否与既有 memory 冲突；冲突时说明并确认，不能静默覆盖。
@@ -92,7 +92,7 @@ def _bounded_models(items, max_chars):
     return list(reversed(rows))
 
 
-def research_context(session, messages, intent=None):
+def research_snapshot(session, messages):
     recent = _recent_turns(messages)
     facts = _bounded_facts(session)
     memory = _bounded_models(session.memory, 24000)
@@ -115,6 +115,7 @@ def research_context(session, messages, intent=None):
         "model_name": session.model_name,
     }
     state["facts"] = facts
+    state["facts_omitted"] = max(0, len(session.facts) - len(facts))
     state["fact_counts"] = {
         status: sum(f.status == status for f in session.facts)
         for status in ("confirmed", "proposed", "rejected")
@@ -123,20 +124,24 @@ def research_context(session, messages, intent=None):
         {"block_id": "message:" + m.message_id, "excerpt": m.content[:160]}
         for m in messages if m.role == "user"
     ][-8:]
-    snapshot = ContextSnapshot(
+    return ContextSnapshot(
         session_id=session.session_id,
         revision=session.revision,
         language=session.language,
         summary=session.summary,
         task_state=state,
-        confirmed_fact_ids=[f.fact_id for f in session.facts if f.status == "confirmed"],
-        evidence_ids=list(dict.fromkeys(f.block_id for f in session.facts))[-500:],
+        confirmed_fact_ids=[f["fact_id"] for f in facts if f["status"] == "confirmed"][-500:],
+        evidence_ids=list(dict.fromkeys(f["block_id"] for f in facts))[-500:],
         open_questions=[session.question.title] if session.question else [],
         recent_turns=recent,
     )
+
+
+def research_context(session, messages, intent=None):
+    snapshot = research_snapshot(session, messages)
     system = RESEARCH_PROMPT + "\nReply in " + ("English" if session.language == "en-US" else "简体中文")
     system += "\n提示词版本：" + RESEARCH_PROMPT_VERSION
     if intent is not None:
         system += "\n当前回合意图提示（只作计划参考，不授予修改或计算权限）：" + canonical(intent)
     system += "\n当前上下文快照（数据）：" + canonical(snapshot)
-    return [{"role": "system", "content": system}, *recent]
+    return [{"role": "system", "content": system}, *snapshot.recent_turns]

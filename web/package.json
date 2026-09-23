@@ -8,17 +8,21 @@
     "build": "vite build",
     "lint": "oxlint",
     "test": "node --test tests/domain.test.js",
+    "test:components": "node scripts/research-component-check.mjs",
     "test:integration": "node scripts/integration-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
+    "happy-dom": "^20.14.5",
     "oxlint": "^1.81.0",
     "vite": "^8.3.0"
   }

@@ -221,3 +221,62 @@ def test_legacy_requests_default_to_chinese():
     assert request().language == "zh-CN"
     with pytest.raises(ValidationError):
         request(language="unrecognized")
+
+
+def test_research_cli_keeps_session_after_invalid_input_and_stale_turn(tmp_path, monkeypatch, capsys):
+    from valuationagent.application.research import ResearchService
+    from valuationagent.cli.research import launch_research
+
+    monkeypatch.setenv("VALUATION_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("VALUATION_LLM_API_KEY", raising=False)
+    monkeypatch.setattr("valuationagent.cli.research.configure_model", lambda _: (None, ""))
+    answers = iter(["x" * 8001, "first request", "please continue", "/quit"])
+    monkeypatch.setattr("valuationagent.cli.main.text_input", lambda *args, **kwargs: next(answers))
+    original_turn = ResearchService.turn
+    calls = 0
+
+    def conflicted_turn(service, session_id, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("Confirmation changed; please retry.")
+        return original_turn(service, session_id, payload)
+
+    monkeypatch.setattr(ResearchService, "turn", conflicted_turn)
+    launch_research(language="en-US")
+    output = capsys.readouterr().out
+    assert "Confirmation changed" in output
+    assert "8000" in output
+    assert calls == 2
+    store = SQLiteRunStore(tmp_path)
+    session = store.list_research()[0]
+    assert any(message.content == "please continue" for message in store.list_messages(session.session_id))
+    assert session.session_id in output
+
+
+def test_research_cli_configuration_and_export_failures_remain_recoverable(tmp_path, monkeypatch, capsys):
+    from valuationagent.cli.research import launch_research
+    from valuationagent.schemas.models import ModelConnectionInput
+
+    monkeypatch.setenv("VALUATION_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("VALUATION_LLM_API_KEY", raising=False)
+
+    def invalid_configuration(_):
+        return ModelConnectionInput(model="test", api_key="TEST_ONLY_NOT_A_REAL_KEY",
+                                    base_url="https://example.test/v1?key=never-echo-this")
+
+    def blocked_export(*args):
+        raise PermissionError("Cannot write the report; choose a writable folder.")
+
+    monkeypatch.setattr("valuationagent.cli.research.configure_model", invalid_configuration)
+    monkeypatch.setattr("valuationagent.cli.research.build_research_export", blocked_export)
+    answers = iter(["/export html", "continue locally", "/quit"])
+    monkeypatch.setattr("valuationagent.cli.main.text_input", lambda *args, **kwargs: next(answers))
+    launch_research(language="en-US")
+    output = capsys.readouterr().out
+    assert "never-echo-this" not in output
+    assert "Session preserved" in output
+    assert "Cannot write the report" in output
+    store = SQLiteRunStore(tmp_path)
+    session = store.list_research()[0]
+    assert any(message.content == "continue locally" for message in store.list_messages(session.session_id))

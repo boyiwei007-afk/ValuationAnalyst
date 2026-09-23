@@ -21,7 +21,11 @@ def run_tool_loop(
     for round_index in range(1, max_rounds + 1):
         trace["rounds"] = round_index
         reply = llm.chat(messages, tools=registry.schemas(), tool_choice="required", max_tokens=max_tokens)
+        if not isinstance(reply, dict):
+            raise LlmError("TOOL_RESPONSE_INVALID: 模型未返回有效的工具调用消息。")
         calls = reply.get("tool_calls") or []
+        if not isinstance(calls, list):
+            raise LlmError("TOOL_RESPONSE_INVALID: 工具调用列表格式不正确。")
         if len(calls) != 1:
             trace["protocol_errors"] += 1
             messages.append(
@@ -32,11 +36,15 @@ def run_tool_loop(
             )
             continue
         item = calls[0]
-        fn = item.get("function", {})
-        if not isinstance(item.get("id"), str) or not isinstance(
-            fn.get("arguments"), str
+        if not isinstance(item, dict) or not isinstance(item.get("function"), dict):
+            raise LlmError("TOOL_RESPONSE_INVALID: 工具调用结构不完整。")
+        fn = item["function"]
+        if (
+            not isinstance(item.get("id"), str) or not item["id"].strip()
+            or not isinstance(fn.get("name"), str) or not fn["name"].strip()
+            or not isinstance(fn.get("arguments"), str)
         ):
-            raise LlmError("TOOL_RESPONSE_INVALID: 工具调用缺少 id 或 JSON 参数。")
+            raise LlmError("TOOL_RESPONSE_INVALID: 工具调用缺少 id、名称或 JSON 参数。")
         if len(fn["arguments"]) > 32000:
             raise LlmError("TOOL_ARGUMENTS_TOO_LARGE: 工具参数过长。")
         clean = {

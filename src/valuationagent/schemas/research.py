@@ -94,7 +94,7 @@ class ResearchSession(ApiModel):
     last_issue: ResearchIssue | None = None
     summary: str = ""
     agent_protocol_version: str = "research-agent-v2"
-    prompt_version: str = "research-2026-09-22"
+    prompt_version: str = "research-2026-09-22.1"
     model_provider: str = ""
     model_name: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

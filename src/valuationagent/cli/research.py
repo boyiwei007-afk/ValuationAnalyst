@@ -30,6 +30,21 @@ COMPANY_CHOICES = [
 ]
 
 
+def _error_message(exc):
+    """Validation diagnostics must not echo the rejected input or API key."""
+    if hasattr(exc, "errors"):
+        return "; ".join(item["msg"] for item in exc.errors())
+    return str(exc)
+
+
+def _make_turn(en=False, **values):
+    try:
+        return ResearchTurn(**values)
+    except ValueError as exc:
+        console.print(panel(Text(_error_message(exc), style="warn"), "Please check" if en else "请检查输入"))
+        return None
+
+
 def configure_model(language="zh-CN"):
     """Run the first-entry model setup without writing a secret to disk."""
     from valuationagent.cli.main import autocomplete, secret_input, select, text_input
@@ -152,17 +167,21 @@ def launch_research(language=None, session_id=None):
     en = language == "en-US"
     console.print(getting_started(language))
     configured_company = ""
-    if os.getenv("VALUATION_LLM_MODEL") and os.getenv("VALUATION_LLM_API_KEY"):
-        service.attach(session_id, OpenAICompatibleClient.from_environment())
-        console.print(Text("Live Agent · " + os.getenv("VALUATION_LLM_MODEL", ""), style="accent"))
-    elif is_new_session:
-        client, configured_company = configure_model(language)
-        if client is not None:
-            service.attach(session_id, client)
+    try:
+        if os.getenv("VALUATION_LLM_MODEL") and os.getenv("VALUATION_LLM_API_KEY"):
+            service.attach(session_id, OpenAICompatibleClient.from_environment())
+            console.print(Text("Live Agent · " + os.getenv("VALUATION_LLM_MODEL", ""), style="accent"))
+        elif is_new_session:
+            client, configured_company = configure_model(language)
+            if client is not None:
+                service.attach(session_id, client)
+            else:
+                console.print(Text("Local preparation · /connect to use your model" if en else "资料整理模式 · /connect 可重新配置模型", style="muted"))
         else:
             console.print(Text("Local preparation · /connect to use your model" if en else "资料整理模式 · /connect 可重新配置模型", style="muted"))
-    else:
-        console.print(Text("Local preparation · /connect to use your model" if en else "资料整理模式 · 配置环境变量后 /connect 连接模型", style="muted"))
+    except (ValueError, LlmError) as exc:
+        console.print(panel(Text(_error_message(exc), style="warn"), "Model setup" if en else "模型配置"))
+        console.print(Text("Session preserved. Use /connect to retry." if en else "会话已保留，可以输入 /connect 重新配置。", style="muted"))
     seen_question = None
     try:
         while True:
@@ -184,12 +203,12 @@ def launch_research(language=None, session_id=None):
                     questionary.Choice("Keep chatting; decide later" if en else "暂不选择，继续对话", value="__skip")], language)
                 seen_question = question.question_id
                 if answer not in {"__text", "__skip"}:
-                    payload = ResearchTurn(question_id=question.question_id, option_id=answer)
+                    payload = _make_turn(en, question_id=question.question_id, option_id=answer)
                 elif answer == "__text":
                     content = text_input("Your requirements" if en else "补充或修改要求")
                     if not content.strip():
                         continue
-                    payload = ResearchTurn(content=content, question_id=question.question_id)
+                    payload = _make_turn(en, content=content, question_id=question.question_id)
                 else:
                     continue
             else:
@@ -226,7 +245,7 @@ def launch_research(language=None, session_id=None):
                         service.attach(session_id, client)
                         console.print(Text("Model connected" if en else "模型已连接，可继续自然语言研究。", style="good"))
                     except (LlmError, ValueError) as exc:
-                        console.print(panel(Text(str(exc)), "Model"))
+                        console.print(panel(Text(_error_message(exc)), "Model"))
                     continue
                 if content == "/wizard":
                     from valuationagent.cli.main import wizard
@@ -262,7 +281,7 @@ def launch_research(language=None, session_id=None):
                         target = directory / f"{session_id}-v{session.revision}.{format}"
                         target.write_text(body, encoding="utf-8")
                         console.print(Text(str(target.resolve()), style="good"))
-                    except ValueError as exc:
+                    except (ValueError, OSError) as exc:
                         console.print(panel(Text(str(exc)), "Export"))
                     continue
                 if content.startswith("/upload "):
@@ -276,10 +295,20 @@ def launch_research(language=None, session_id=None):
                     except (ValueError, OSError) as exc:
                         console.print(panel(Text(str(exc)), "File"))
                         continue
-                    payload = ResearchTurn(content="请读取并整理这份资料，提取有关字段，保留来源和缺口。", file_ids=[file_id])
+                    payload = _make_turn(en, content=("Read and organize this document, extract relevant fields, and preserve sources and gaps." if en else "请读取并整理这份资料，提取有关字段，保留来源和缺口。"), file_ids=[file_id])
                 else:
-                    payload = ResearchTurn(content=content)
-            result = turn_with_display(service, session_id, payload, en)
+                    payload = _make_turn(en, content=content)
+            if payload is None:
+                seen_question = None
+                continue
+            try:
+                result = turn_with_display(service, session_id, payload, en)
+            except (ValueError, LlmError, OSError) as exc:
+                console.print(panel(Text(_error_message(exc), style="warn"), "Please retry" if en else "请重试"))
+                # Another interface may have answered the old question. Reload
+                # the session on the next iteration rather than losing the CLI.
+                seen_question = None
+                continue
             console.print(panel(Text(result["messages"][-1]["content"]), "ValuationAgent"))
     except (KeyboardInterrupt, EOFError):
         pass

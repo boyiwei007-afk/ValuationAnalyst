@@ -14,7 +14,7 @@ from valuationagent.core.documents import parse_document
 from valuationagent.core.tools import NoArguments, ToolSpec
 from valuationagent.llm.client import LlmError, OpenAICompatibleClient
 from valuationagent.schemas.models import ModelConnectionInput
-from valuationagent.schemas.research import ResearchTurn
+from valuationagent.schemas.research import FactCandidate, ResearchTurn
 from valuationagent.storage.sqlite import SQLiteRunStore
 
 
@@ -222,6 +222,21 @@ def test_invented_number_is_rejected_and_tool_feedback_reaches_model(service):
     assert "原文不支持" in result["messages"][-1]["content"]
 
 
+@pytest.mark.parametrize("sign", ["-", "−"])
+def test_extraction_cannot_drop_a_negative_source_sign(service, sign):
+    quote = f"2025 年合并报表，单位万元。净利润：{sign}12000。"
+    fid = service.store.save_upload("亏损报表.txt", "historical_financials", "text/plain", quote.encode())["file_id"]
+    model = ScriptedModel([
+        ("propose_facts", {"candidates": [candidate(fid, metric="net_income", quote=quote)]}),
+        ("propose_facts", {"candidates": [candidate(fid, metric="net_income", quote=quote, raw_value=f"{sign}12000")]}),
+    ])
+    session = service.create(llm=model)
+    state = service.turn(session.session_id, ResearchTurn(content="提取净利润", file_ids=[fid]))
+    assert len(state["session"]["facts"]) == 1
+    assert state["session"]["facts"][0]["normalized_value"] == "-120000000"
+    assert any(event["type"] == "tool.failed" for event in state["events"])
+
+
 def test_repeated_identical_tool_failure_stops_and_asks_user(service):
     fid = upload(service.store)
     invalid = {"candidates": [candidate(fid, raw_value="999999")]}
@@ -320,6 +335,128 @@ def test_llm_receives_source_ambiguity_contract_and_free_text_guidance(service):
         "暂不采用这列，等待补充资料",
     ]
     assert "直接输入你的判断" in result["messages"][-1]["content"]
+
+
+def test_selected_clarification_preserves_its_question_for_the_next_model_turn(service):
+    model = ScriptedModel([
+        ("finish_response", {
+            "answer": "需要确认该列的报告期。",
+            "question": "财务表第 C 列标为 2024，但附注称它是 2023；应采用哪个报告期？",
+            "options": ["采用表头年份", "采用附注年份"],
+        }),
+        ("finish_response", {"answer": "将按你选择的表头年份整理候选，仍需核对确认。"}),
+    ])
+    session = service.create(llm=model)
+    state = service.turn(session.session_id, ResearchTurn(content="这份表格的年份不一致"))
+    question = state["session"]["question"]
+    state = service.turn(session.session_id, ResearchTurn(
+        question_id=question["question_id"], option_id="choice_0"
+    ))
+    prompt = model.calls[-1][0]["content"]
+    assert question["title"] in prompt
+    assert '"selected_option_id":"choice_0"' in prompt
+    assert state["session"]["question"] is None
+
+
+def test_large_fact_history_is_bounded_and_old_user_notes_are_retrievable(service):
+    model = ScriptedModel([
+        ("inspect_context", {"section": "facts", "query": "historical_revenue_000", "limit": 1}),
+        ("inspect_context", {"section": "user_notes", "query": "早期成本口径"}),
+        ("finish_response", {"answer": "已检索到早期字段和用户说明。"}),
+    ])
+    session = service.create(llm=model)
+    session.facts = [FactCandidate(
+        fact_id=f"fact_{index}", metric=f"historical_revenue_{index:03}",
+        raw_value="100", unit="万元", normalized_value="1000000", period="2025",
+        scope="consolidated", block_id=f"source:{index}", quote="营业收入 100 万元",
+        status="confirmed",
+    ) for index in range(620)]
+    service.store.save_research(session)
+    service.store.add_message(session.session_id, "user", "早期成本口径：统一使用主营业务成本。", "research")
+    for index in range(30):
+        service.store.add_message(session.session_id, "user", f"近期说明 {index}", "research")
+    state = service.turn(session.session_id, ResearchTurn(content="请找回早期的字段和成本说明"))
+    assert state["session"]["last_issue"] is None
+    assert len(model.calls[0][0]["content"]) < 50000
+    assert '"facts_omitted":' in model.calls[0][0]["content"]
+    fact_output = json.loads(next(message["content"] for message in model.calls[1] if message["role"] == "tool"))
+    assert fact_output["total"] == 1
+    assert fact_output["items"][0]["fact_id"] == "fact_0"
+    note_output = json.loads([message["content"] for message in model.calls[2] if message["role"] == "tool"][-1])
+    assert note_output["items"][0]["text"] == "早期成本口径：统一使用主营业务成本。"
+    assert note_output["items"][0]["block_id"].startswith("message:")
+
+
+def test_context_retrieval_paginates_without_losing_history(service):
+    model = ScriptedModel([
+        ("inspect_context", {"section": "user_notes", "limit": 2}),
+        ("inspect_context", {"section": "user_notes", "offset": 2, "limit": 2}),
+        ("finish_response", {"answer": "已读取全部说明。"}),
+    ])
+    session = service.create(llm=model)
+    for index in range(3):
+        service.store.add_message(session.session_id, "user", f"历史说明 {index}", "research")
+    service.turn(session.session_id, ResearchTurn(content="查看历史说明"))
+    first = json.loads(next(message["content"] for message in model.calls[1] if message["role"] == "tool"))
+    second = json.loads([message["content"] for message in model.calls[2] if message["role"] == "tool"][-1])
+    assert first["next_offset"] == 2
+    assert second["next_offset"] is None
+    assert [item["text"] for item in first["items"] + second["items"]] == [
+        "历史说明 0", "历史说明 1", "历史说明 2", "查看历史说明",
+    ]
+
+
+@pytest.mark.parametrize("response", [None, {"tool_calls": "invalid"}, {"tool_calls": [None]},
+    {"tool_calls": [{"id": "call_bad", "function": None}]},
+    {"tool_calls": [{"id": "call_bad", "function": {"name": [], "arguments": "{}"}}]}])
+def test_malformed_model_protocol_becomes_actionable_recovery(service, response):
+    class MalformedModel:
+        def chat(self, messages, **kwargs):
+            return response
+
+    session = service.create(llm=MalformedModel())
+    state = service.turn(session.session_id, ResearchTurn(content="继续整理资料"))
+    assert state["session"]["last_issue"]["code"] == "TOOL_RESPONSE_INVALID"
+    assert state["session"]["question"]["kind"] == "recovery"
+    assert not any(event["type"] == "tool.started" for event in state["events"])
+
+
+def test_model_errors_do_not_persist_credentials_in_recovery_or_audit(service):
+    secret = "sk-testcredential123456789"
+
+    class FailingModel:
+        def chat(self, messages, **kwargs):
+            raise LlmError("LLM_HTTP_400: 网关返回错误，凭证 " + secret)
+
+    session = service.create(llm=FailingModel())
+    state = service.turn(session.session_id, ResearchTurn(content="继续"))
+    assert secret not in json.dumps(state, ensure_ascii=False)
+    assert "REDACTED_CREDENTIAL" in state["session"]["last_issue"]["message"]
+
+
+def test_tool_errors_and_question_labels_do_not_persist_credentials(service):
+    secret = "sk-testcredential123456789"
+
+    class FailingProvider:
+        provider_id = "failing-provider"
+        version = "test"
+
+        def tool_specs(self, session):
+            def fail(_):
+                raise ValueError("上游拒绝凭证 " + secret)
+            return [ToolSpec("failing_tool", "test", NoArguments, fail)]
+
+    service.tool_providers = (FailingProvider(),)
+    model = ScriptedModel([
+        ("failing_tool", {}),
+        ("finish_response", {"answer": "需要重新连接。", "question": "重新输入 " + secret,
+                             "options": ["修改 " + secret, "稍后处理"]}),
+    ])
+    session = service.create(llm=model)
+    state = service.turn(session.session_id, ResearchTurn(content="继续"))
+    assert secret not in json.dumps(state, ensure_ascii=False)
+    assert state["session"]["question"]["kind"] == "clarification"
+    assert secret not in json.dumps(model.calls[-1], ensure_ascii=False)
 
 
 def test_excel_locations_and_formulas_are_not_executed(service):
