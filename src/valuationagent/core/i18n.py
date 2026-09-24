@@ -57,6 +57,7 @@ ENGLISH = {
     "基准 / 股": "Base / share",
     "区间 / 股": "Range / share",
     "\n参考模型，待金融团队核准。": "\nReference model; financial team approval pending.",
+    "\n金融小组非金融行业模型；参数版本与降级决策随结果保存。": "\nFinance-team model for non-financial companies; parameter versions and fallback decisions are saved with the result.",
     "估值结果": "Valuation results",
     "待执行": "Pending",
     "执行中": "Running",
@@ -111,6 +112,7 @@ ENGLISH = {
     "WACC {wacc:.2%}，永续增长率 {growth:.2%}；收入增长：": "WACC {wacc:.2%}; terminal growth {growth:.2%}; revenue growth: ",
     "。来源：": ". Source: ",
     "模型为参考版本，尚待金融团队核准。": "Reference model; financial team approval pending. ",
+    "正式模型已接入；请重点复核数据等级、自动降级和市场参数时点。": "The formal model is active. Review data quality, fallback decisions and market-data dates.",
     "请复核资本成本、终值、同业选择和数据口径。": "Review capital costs, terminal value, peer selection and data definitions.",
     "/股": "/share",
     "已生成 {count} 个 WACC × 永续增长率组合；无效组合明确标记。": "Generated {count} WACC × terminal growth combinations; invalid cells are explicitly marked.",
@@ -123,11 +125,17 @@ ENGLISH = {
     "目标企业": "Target company",
     "DCF 基准 {base:.2f}/股，区间 {low:.2f}—{high:.2f}/股。": "DCF base {base:.2f}/share; range {low:.2f}—{high:.2f}/share. ",
     "数据模式 {mode}；模型 {version}，尚待金融团队核准。": "Data mode {mode}; model {version}; financial team approval pending.",
+    "数据模式 {mode}；模型 {version}。正式模型按金融小组规则执行，降级和待复核项见警告。": "Data mode {mode}; model {version}. The formal finance-team rules were applied; see warnings for fallbacks and review items.",
+    "DCF与相对估值分别展示；两类方法中枢较接近。": "DCF and relative valuation are shown independently; their midpoints are reasonably close.",
+    "DCF与相对估值分别展示；两类方法差异较大，应复核增长、资本成本和同业口径。": "DCF and relative valuation are shown independently; the large gap requires a review of growth, capital costs and peer definitions.",
+    "仅DCF形成有效区间；相对估值独立保留为不可用。": "Only DCF produced a valid range; relative valuation remains independently marked unavailable.",
+    "仅相对估值形成有效区间；DCF独立保留为不可用。": "Only relative valuation produced a valid range; DCF remains independently marked unavailable.",
     "两类方法存在重叠区间；重叠仅表示结果一致程度，不构成单独的推荐区间。": "The valuation ranges overlap. This indicates agreement between methods; the overlap is not a standalone recommended range.",
     "两类估值区间没有重叠，需要复核增长、利润率、资本成本和可比公司口径。": "The valuation ranges do not overlap. Review growth, margins, capital costs and comparable company definitions.",
     "当前仅有可用的 DCF 结果；相对估值未形成有效区间。": "Only DCF results are available; relative valuation produced no valid range.",
     "当前仅有可用的相对估值结果；DCF 未形成有效区间。": "Only relative valuation results are available; DCF produced no valid range.",
     "当前没有可用的估值区间。": "No valid valuation range is available.",
+    "当前没有有效估值区间。": "No valid valuation range is available.",
 }
 
 

@@ -60,7 +60,7 @@ def test_api_run_events_results_and_conversation(tmp_path):
         assert any("event: run.completed" in line for line in lines)
 
 
-def test_capabilities_are_honest_about_unimplemented_adapters(tmp_path):
+def test_capabilities_report_runtime_adapters(tmp_path):
     app = create_app(tmp_path / "api-runtime")
     with TestClient(app) as client:
         capabilities = {
@@ -71,7 +71,7 @@ def test_capabilities_are_honest_about_unimplemented_adapters(tmp_path):
     assert capabilities["durable_conversation_context"]["available"] is True
     assert capabilities["interactive_agent_recovery"]["available"] is True
     assert capabilities["agent_tool_extensions"]["available"] is True
-    assert capabilities["ticker_data_provider"]["available"] is False
+    assert capabilities["ticker_data_provider"]["available"] is True
     assert capabilities["pdf_excel_extraction"]["available"] is False
 
 

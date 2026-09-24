@@ -7,6 +7,14 @@ from rich.text import Text
 from rich.live import Live
 from rich.console import Group
 from valuationagent.application.research import ResearchService
+from valuationagent.search.providers import (
+    TavilySearchProvider,
+    UnavailableSearchProvider,
+    create_search_provider,
+)
+from valuationagent.finance.tools import FinanceResearchToolProvider
+from valuationagent.core.data import LocalDataProvider
+from valuationagent.market.tushare import TushareApiClient, TushareDataProvider
 from valuationagent.application.research_export import build_research_export
 from valuationagent.llm.client import LlmError, OpenAICompatibleClient
 from valuationagent.schemas.models import ModelConnectionInput
@@ -14,18 +22,21 @@ from valuationagent.schemas.research import ResearchTurn
 from valuationagent.cli.ui import console, panel, welcome
 
 
-MODEL_CHOICES = [
-    "deepseek-flash     ·  DeepSeek Flash",
-    "deepseek-v4-pro    ·  DeepSeek V4 Pro",
-    "gpt-4o-mini        ·  OpenAI GPT-4o mini",
-    "__custom__  ·  自定义模型 / Custom model",
-]
+MODEL_CHOICES = {
+    "deepseek": [
+        ("DeepSeek Flash", "deepseek-flash"),
+        ("DeepSeek V4 Pro", "deepseek-v4-pro"),
+    ],
+    "openai": [
+        ("GPT-4o mini", "gpt-4o-mini"),
+    ],
+}
 COMPANY_CHOICES = [
     "600519 贵州茅台",
     "000858 五粮液",
     "300750 宁德时代",
-    "601318 中国平安",
-    "000001 平安银行",
+    "000333 美的集团",
+    "600276 恒瑞医药",
     "603893 瑞芯微",
 ]
 
@@ -45,7 +56,135 @@ def _make_turn(en=False, **values):
         return None
 
 
-def configure_model(language="zh-CN"):
+def _model_choices(provider, en=False):
+    """Return a compact, provider-aware model menu with custom input last."""
+    choices = [
+        questionary.Choice(f"{label:<20} {model_id}", value=model_id)
+        for label, model_id in MODEL_CHOICES.get(provider, [])
+    ]
+    choices.append(
+        questionary.Choice(
+            "Custom model…" if en else "自定义模型…",
+            value="__custom__",
+        )
+    )
+    return choices
+
+
+def _agent_choices(question, en=False):
+    """Render model-generated choices and keep one consistent free-text exit."""
+    choices = [questionary.Choice(option.label, value=option.id) for option in question.options]
+    if question.kind in {"search_unavailable", "search_failed"}:
+        choices.insert(
+            0,
+            questionary.Choice(
+                "Connect Tavily Search" if en else "连接 Tavily 搜索",
+                value="__search__",
+            ),
+        )
+    choices.append(questionary.Choice("Chat", value="__chat__"))
+    return choices
+
+
+def configure_search(language="zh-CN"):
+    """Create an in-memory Tavily provider; the key is never persisted."""
+    from valuationagent.cli.main import secret_input
+
+    en = language == "en-US"
+    api_key = secret_input(
+        "Tavily API Key (session only; never saved)"
+        if en
+        else "Tavily API Key（仅本次会话使用，不会保存）"
+    ).strip()
+    if not api_key:
+        console.print(Text(
+            "No key entered; search remains disconnected."
+            if en else "未输入 Key，联网搜索仍保持未连接。",
+            style="muted",
+        ))
+        return None
+    return TavilySearchProvider(api_key)
+
+
+def configure_search_on_start(language="zh-CN"):
+    """Offer search setup before research so it never appears as a late surprise."""
+    from valuationagent.cli.main import select
+
+    en = language == "en-US"
+    choice = select(
+        "Configure web search now?" if en else "开始前配置联网搜索吗？",
+        [
+            questionary.Choice(
+                "Connect Tavily Search" if en else "连接 Tavily 联网搜索",
+                value="connect",
+            ),
+            questionary.Choice(
+                "Set up later (/search)" if en else "稍后配置（/search）",
+                value="later",
+            ),
+        ],
+        language=language,
+    )
+    if choice != "connect":
+        return None
+    return configure_search(language)
+
+
+def configure_market_data(language="zh-CN"):
+    """Create a session-only Tushare provider without persisting its token."""
+    from valuationagent.cli.main import secret_input
+
+    en = language == "en-US"
+    token = secret_input(
+        "Tushare Token (session only; never saved)"
+        if en else "Tushare Token（仅本次运行使用，不会保存）"
+    ).strip()
+    if not token:
+        console.print(Text(
+            "No token entered; A-share structured data remains disconnected."
+            if en else "未输入 Token，A 股结构化取数仍保持未连接。",
+            style="muted",
+        ))
+        return None
+    return TushareDataProvider(TushareApiClient(token))
+
+
+def configure_data_services_on_start(language, *, need_search, need_market):
+    """Configure missing online services through one compact startup menu."""
+    from valuationagent.cli.main import select
+
+    en = language == "en-US"
+    if need_search and need_market:
+        choices = [
+            questionary.Choice(
+                "Tushare + Tavily (recommended)" if en else "Tushare + Tavily（推荐）",
+                value="both",
+            ),
+            questionary.Choice("Tushare only" if en else "只连接 Tushare A 股取数", value="market"),
+            questionary.Choice("Tavily only" if en else "只连接 Tavily 联网搜索", value="search"),
+            questionary.Choice("Set up later" if en else "稍后配置", value="later"),
+        ]
+    elif need_market:
+        choices = [
+            questionary.Choice("Connect Tushare" if en else "连接 Tushare A 股取数", value="market"),
+            questionary.Choice("Set up later (/market)" if en else "稍后配置（/market）", value="later"),
+        ]
+    else:
+        choices = [
+            questionary.Choice("Connect Tavily Search" if en else "连接 Tavily 联网搜索", value="search"),
+            questionary.Choice("Set up later (/search)" if en else "稍后配置（/search）", value="later"),
+        ]
+    choice = select(
+        "Configure online data services" if en else "配置在线数据服务",
+        choices,
+        language=language,
+    )
+    search = configure_search(language) if choice in {"both", "search"} else None
+    market = configure_market_data(language) if choice in {"both", "market"} else None
+    return search, market
+
+
+def configure_model(language="zh-CN", include_company=True):
     """Run the first-entry model setup without writing a secret to disk."""
     from valuationagent.cli.main import autocomplete, secret_input, select, text_input
 
@@ -70,23 +209,22 @@ def configure_model(language="zh-CN"):
         ],
         language=language,
     )
-    model_name = autocomplete(
-        "Model name (type to filter; free input is allowed)"
-        if en
-        else "模型名称（可选择或直接输入，输入会自动补全）",
-        MODEL_CHOICES,
-    ).strip()
-    if model_name.startswith("__custom__"):
-        model_name = text_input("Custom model name" if en else "输入自定义模型名称").strip()
-    elif "·" in model_name:
-        model_name = model_name.split("·", 1)[0].strip()
+    model_name = select(
+        "Model" if en else "选择模型",
+        _model_choices(provider, en),
+        language=language,
+    )
+    if model_name == "__custom__":
+        model_name = text_input("Model name" if en else "模型名称").strip()
     if not model_name:
         raise ValueError("模型名称不能为空。")
 
-    company = autocomplete(
-        "Company or A-share ticker (optional)" if en else "公司名或 A 股代码（可选，支持直接输入）",
-        COMPANY_CHOICES,
-    ).strip()
+    company = ""
+    if include_company:
+        company = autocomplete(
+            "Company or A-share ticker" if en else "公司或 A 股代码",
+            COMPANY_CHOICES,
+        ).strip()
     defaults = {
         "deepseek": "https://api.deepseek.com",
         "openai": "https://api.openai.com/v1",
@@ -124,7 +262,7 @@ def getting_started(language="zh-CN"):
     body.append("Start with a question or a file.\n" if en else "先说需求，或直接提供资料。\n", style="title")
     body.append("I want to research 600519 and identify missing financial data.\n" if en else "“我想研究 600519，先帮我看看需要哪些财务数据。”\n", style="accent")
     body.append("Upload annual reports, Excel tables or policy text.\n" if en else "上传年报、Excel 财务表或政策原文，先整理信息和来源。\n")
-    body.append("/upload path  ·  /connect  ·  /prepare  ·  /help\n", style="muted")
+    body.append("/upload path  ·  /connect  ·  /search  ·  /market  ·  /prepare  ·  /help\n", style="muted")
     body.append("Choose an option when asked, or enter your own requirements." if en else "需要确认时可选答案，也可以输入自己的修改要求。", style="muted")
     return panel(body, "What can I do?" if en else "你可以这样开始")
 
@@ -151,8 +289,12 @@ def turn_with_display(service, session_id, payload, en=False):
 
 def launch_research(language=None, session_id=None):
     from valuationagent.cli.main import runtime, select, text_input, upload
-    store, _ = runtime()
-    service = ResearchService(store)
+    store, runner = runtime()
+    service = ResearchService(
+        store,
+        search_provider=create_search_provider(),
+        tool_providers=(FinanceResearchToolProvider(),),
+    )
     is_new_session = session_id is None
     console.print(welcome(console.width, console.height))
     if session_id:
@@ -177,11 +319,58 @@ def launch_research(language=None, session_id=None):
                 service.attach(session_id, client)
             else:
                 console.print(Text("Local preparation · /connect to use your model" if en else "资料整理模式 · /connect 可重新配置模型", style="muted"))
+        elif console.is_terminal:
+            client, _ = configure_model(language, include_company=False)
+            if client is not None:
+                service.attach(session_id, client)
+            else:
+                console.print(Text("Local preparation · /connect to use your model" if en else "资料整理模式 · /connect 可重新配置模型", style="muted"))
         else:
             console.print(Text("Local preparation · /connect to use your model" if en else "资料整理模式 · /connect 可重新配置模型", style="muted"))
     except (ValueError, LlmError) as exc:
         console.print(panel(Text(_error_message(exc), style="warn"), "Model setup" if en else "模型配置"))
         console.print(Text("Session preserved. Use /connect to retry." if en else "会话已保留，可以输入 /connect 重新配置。", style="muted"))
+    # Data credentials are intentionally not persisted. Offer one compact setup
+    # for both new and resumed terminal sessions.
+    need_search = isinstance(service.search_provider, UnavailableSearchProvider)
+    need_market = isinstance(runner.data, LocalDataProvider)
+    if console.is_terminal and (need_search or need_market):
+        try:
+            search_provider, market_provider = configure_data_services_on_start(
+                language, need_search=need_search, need_market=need_market
+            )
+            if search_provider is not None:
+                service.attach_search(session_id, search_provider)
+            if market_provider is not None:
+                service.attach_market(session_id, market_provider)
+        except ValueError as exc:
+            console.print(panel(Text(_error_message(exc), style="warn"), "Data services" if en else "在线数据服务"))
+    active_search = service._search_clients.get(session_id, service.search_provider)
+    if isinstance(active_search, UnavailableSearchProvider):
+        console.print(Text(
+            "Web search · set up later with /search"
+            if en else "联网搜索 · 稍后可用 /search 配置",
+            style="muted",
+        ))
+    else:
+        console.print(Text(
+            f"Web search credential ready · {active_search.provider_id} · verified on first search"
+            if en else f"联网搜索凭证已就绪 · {active_search.provider_id} · 首次检索时验证",
+            style="good",
+        ))
+    market_status = service.data_service_status(session_id, default_market=runner.data)["market"]
+    if not market_status["available"]:
+        console.print(Text(
+            "A-share data · set up later with /market"
+            if en else "A 股结构化取数 · 稍后可用 /market 配置",
+            style="muted",
+        ))
+    else:
+        console.print(Text(
+            f"A-share data credential ready · {market_status['provider']} · verified on first retrieval"
+            if en else f"A 股取数凭证已就绪 · {market_status['provider']} · 首次取数时验证",
+            style="good",
+        ))
     seen_question = None
     try:
         while True:
@@ -191,6 +380,7 @@ def launch_research(language=None, session_id=None):
                 if question.proposed_draft:
                     draft = question.proposed_draft
                     fields = [("Company" if en else "公司", draft.company or draft.ticker or ("Pending" if en else "待补充")),
+                              ("Industry" if en else "行业", draft.industry),
                               ("Date" if en else "估值日", str(draft.valuation_date or ("Pending" if en else "待补充"))),
                               ("Methods" if en else "方法", " / ".join(draft.methods).upper() or ("Pending" if en else "待补充")),
                               ("Goal" if en else "目标", draft.objective)]
@@ -198,19 +388,36 @@ def launch_research(language=None, session_id=None):
                 for fact in session.facts:
                     if fact.fact_id in question.fact_ids:
                         console.print(panel(Text(f"{fact.metric}: {fact.raw_value} {fact.unit} · {fact.period} · {fact.scope}\n{fact.quote}\n{fact.block_id}\n" + "; ".join(fact.warnings)), "Candidate" if en else "候选字段"))
-                answer = select(question.title, [*[questionary.Choice(o.label, value=o.id) for o in question.options],
-                    questionary.Choice("Enter your own requirements" if en else "输入其他要求 / 修改说明", value="__text"),
-                    questionary.Choice("Keep chatting; decide later" if en else "暂不选择，继续对话", value="__skip")], language)
-                seen_question = question.question_id
-                if answer not in {"__text", "__skip"}:
+                answer = select(question.title, _agent_choices(question, en), language)
+                if answer == "__search__":
+                    provider = configure_search(language)
+                    if provider is None:
+                        seen_question = None
+                        continue
+                    service.attach_search(session_id, provider)
+                    console.print(Text(
+                        "Tavily credential loaded · retrying the saved search"
+                        if en else "Tavily 凭证已加载 · 正在重试刚才的检索",
+                        style="good",
+                    ))
+                    payload = _make_turn(
+                        en,
+                        content=(
+                            "Tavily search is connected. Retry the previous search request now."
+                            if en else "Tavily 搜索已经连接，请立即重试刚才的检索请求。"
+                        ),
+                        question_id=question.question_id,
+                    )
+                    seen_question = question.question_id
+                elif answer != "__chat__":
                     payload = _make_turn(en, question_id=question.question_id, option_id=answer)
-                elif answer == "__text":
-                    content = text_input("Your requirements" if en else "补充或修改要求")
+                else:
+                    content = text_input("Chat")
                     if not content.strip():
+                        seen_question = None
                         continue
                     payload = _make_turn(en, content=content, question_id=question.question_id)
-                else:
-                    continue
+                seen_question = question.question_id
             else:
                 default_prompt = ""
                 if configured_company:
@@ -220,14 +427,14 @@ def launch_research(language=None, session_id=None):
                         else f"我想研究 {configured_company}，先帮我梳理需要哪些历史财务数据。"
                     )
                     configured_company = ""
-                content = text_input("You" if en else "你", default=default_prompt).strip()
+                content = text_input("Chat", default=default_prompt).strip()
                 if not content:
                     continue
                 if content in {"/quit", "/exit"}:
                     break
                 if content == "/help":
                     console.print(getting_started(language))
-                    console.print(Text("/upload 路径 · /files · /memory · /tools · /confirm · /connect · /prepare\n/company 名称 · /date YYYY-MM-DD · /methods dcf,pe\n/export json|html · /wizard · /demo · /quit", style="muted"))
+                    console.print(Text("/upload 路径 · /files · /memory · /tools · /confirm · /connect · /search · /market · /prepare · /valuation\n/company 名称 · /industry 行业 · /date YYYY-MM-DD · /methods dcf,pe,ps,ev_ebitda\n/export json|html · /wizard · /demo · /quit", style="muted"))
                     continue
                 if content == "/confirm":
                     seen_question = None
@@ -239,13 +446,41 @@ def launch_research(language=None, session_id=None):
                             with console.status("Connecting…" if en else "正在检查模型连接…"):
                                 client.test_connection()
                         else:
-                            client, _ = configure_model(language)
+                            client, _ = configure_model(language, include_company=False)
                             if client is None:
                                 continue
                         service.attach(session_id, client)
                         console.print(Text("Model connected" if en else "模型已连接，可继续自然语言研究。", style="good"))
                     except (LlmError, ValueError) as exc:
                         console.print(panel(Text(_error_message(exc)), "Model"))
+                    continue
+                if content == "/search":
+                    try:
+                        provider = configure_search(language)
+                        if provider is None:
+                            continue
+                        service.attach_search(session_id, provider)
+                        console.print(Text(
+                            "Tavily credential loaded; the first search will verify it."
+                            if en else "Tavily 凭证已加载，首次检索时自动验证。",
+                            style="good",
+                        ))
+                    except ValueError as exc:
+                        console.print(panel(Text(_error_message(exc)), "Search" if en else "联网搜索"))
+                    continue
+                if content == "/market":
+                    try:
+                        market_provider = configure_market_data(language)
+                        if market_provider is None:
+                            continue
+                        service.attach_market(session_id, market_provider)
+                        console.print(Text(
+                            "Tushare credential loaded; the first retrieval will verify it."
+                            if en else "Tushare 凭证已加载，首次正式取数时自动验证。",
+                            style="good",
+                        ))
+                    except ValueError as exc:
+                        console.print(panel(Text(_error_message(exc)), "A-share data" if en else "A 股取数"))
                     continue
                 if content == "/wizard":
                     from valuationagent.cli.main import wizard
@@ -254,6 +489,23 @@ def launch_research(language=None, session_id=None):
                 if content == "/demo":
                     from valuationagent.cli.main import demo
                     demo(company="估值演示公司", valuation_date=None, chat=False, plain=True, language=language)
+                    continue
+                if content == "/valuation":
+                    try:
+                        record = service.submit_valuation(session_id, runner)
+                        with console.status("Running valuation…" if en else "正在执行正式估值流水线…"):
+                            record = runner.execute(record.run_id)
+                        if record.result is None:
+                            message = (record.error or {}).get("message") or (record.review or {}).get("message") or str(record.status)
+                            raise ValueError(message)
+                        console.print(panel(Text(record.result.executive_summary), "Valuation result" if en else "估值结果"))
+                        console.print(Text(
+                            (f"Export: valuationagent export {record.run_id} -o report.xlsx / report.pdf" if en else
+                             f"导出：valuationagent export {record.run_id} -o report.xlsx（或 report.pdf）"),
+                            style="muted",
+                        ))
+                    except (ValueError, OSError) as exc:
+                        console.print(panel(Text(_error_message(exc), style="warn"), "Valuation" if en else "提交估值"))
                     continue
                 if content == "/files":
                     for doc in session.documents:

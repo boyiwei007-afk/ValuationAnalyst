@@ -215,7 +215,13 @@ def result_view(record):
         )
     for r in result.relative:
         table.add_row(
-            _({"pe": "P/E · 市盈率", "ev_ebitda": "EV/EBITDA"}.get(r.method, r.method)),
+            _(
+                {
+                    "pe": "P/E · 市盈率",
+                    "ps": "P/S · 市销率",
+                    "ev_ebitda": "EV/EBITDA",
+                }.get(r.method, r.method)
+            ),
             number(r.per_share_value),
             f"{number(r.range_low)} — {number(r.range_high)}"
             if r.status == "success"
@@ -228,7 +234,12 @@ def result_view(record):
     caption.append(result.reconciliation.conclusion, style="muted")
     if result.warnings:
         caption.append("\n" + "；".join(result.warnings), style="warn")
-    caption.append(_("\n参考模型，待金融团队核准。"), style="muted")
+    caption.append(
+        _("\n参考模型，待金融团队核准。")
+        if result.model_version.endswith("-reference")
+        else _("\n金融小组非金融行业模型；参数版本与降级决策随结果保存。"),
+        style="muted",
+    )
     return panel(Group(table, caption), _("估值结果"))
 
 

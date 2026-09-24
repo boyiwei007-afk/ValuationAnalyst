@@ -25,6 +25,17 @@ export async function downloadResearch(id, format) {
   link.href = url; link.download = `${id}.${format}`; link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
+export async function downloadRun(id, format) {
+  const response = await fetch(`${base}/api/runs/${id}/export?format=${format}`)
+  if (!response.ok) {
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.detail || '导出失败 / Export failed')
+  }
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url; link.download = `valuation-${id}.${format}`; link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 export async function uploadFile(file, role) {
   if (file.size > 50 * 1024 * 1024) throw new Error('文件不能超过 50 MB / Maximum file size: 50 MB')
   const data = new FormData()

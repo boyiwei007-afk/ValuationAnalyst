@@ -202,7 +202,7 @@ class SQLiteRunStore:
             parent_run_id=lineage["parent_id"] if lineage else None,
             revision=lineage["revision"] if lineage else 1,
             revision_reason=lineage["reason"] if lineage else None,
-            workflow_version="0.2.0" if lineage else "0.1.0",
+            workflow_version="0.5.0" if lineage else "0.1.0",
         )
 
     def list_runs(self, limit: int = 50) -> list[RunRecord]:
@@ -288,8 +288,19 @@ class SQLiteRunStore:
             raise ValueError("file exceeds the 50 MB limit")
         file_id = f"file_{uuid.uuid4().hex}"
         safe_suffix = Path(name).suffix.lower()
-        if safe_suffix not in {".pdf", ".xlsx", ".xls", ".csv", ".json", ".txt", ".md"}:
-            raise ValueError("supported file types: PDF, Excel, CSV, JSON, TXT, Markdown")
+        if safe_suffix not in {
+            ".pdf",
+            ".docx",
+            ".xlsx",
+            ".xls",
+            ".csv",
+            ".json",
+            ".txt",
+            ".md",
+        }:
+            raise ValueError(
+                "supported file types: PDF, DOCX, Excel, CSV, JSON, TXT, Markdown"
+            )
         target = (self.upload_dir / f"{file_id}{safe_suffix}").resolve()
         if self.upload_dir not in target.parents:
             raise ValueError("invalid file name")

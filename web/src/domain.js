@@ -1,13 +1,14 @@
 export function initialDraft(language) {
   const now = new Date()
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
-  return { language, mode: 'demo', company: language === 'en-US' ? 'Example Manufacturing Co.' : '示例制造企业', date, source: 'structured', ticker: '', assumptionSource: 'automatic', wacc: '9.5', growth: '3', revenueGrowth: '', years: '5', methods: ['dcf', 'pe', 'ev_ebitda'], fileIds: [], assumptionFileIds: [] }
+  return { language, mode: 'demo', company: language === 'en-US' ? 'Example Manufacturing Co.' : '示例制造企业', date, source: 'structured', ticker: '', assumptionSource: 'automatic', wacc: '9.5', growth: '3', revenueGrowth: '', years: '10', methods: ['dcf', 'pe', 'ev_ebitda'], fileIds: [], assumptionFileIds: [] }
 }
 
 export const STAGES = [
   ['data_intake', '资料与来源', 'Data & sources'],
   ['agent_planning', 'Agent 规划', 'Agent planning'],
   ['financial_validation', '财务审核', 'Financial review'],
+  ['industry_parameters', '行业识别与参数', 'Industry parameters'],
   ['assumption_resolution', '经营假设', 'Assumptions'],
   ['financial_forecast', '现金流预测', 'Cash flow forecast'],
   ['dcf_valuation', 'DCF 估值', 'DCF valuation'],
@@ -23,7 +24,7 @@ export const statusLabel = (status, t) => ({
   waiting_review: t('需要复核', 'Needs review'), failed: t('执行失败', 'Failed'),
   cancelled: t('已取消', 'Cancelled'), cached: t('已复用', 'Cached'),
 }[status] || status || t('未开始', 'Not started'))
-export const methodLabel = method => ({ dcf: 'DCF', pe: 'P/E', ev_ebitda: 'EV/EBITDA' }[method] || method)
+export const methodLabel = method => ({ dcf: 'DCF', pe: 'P/E', ps: 'P/S', ev_ebitda: 'EV/EBITDA' }[method] || method)
 export const money = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toLocaleString('en-US', { maximumFractionDigits: digits, minimumFractionDigits: digits })
 export const percent = value => value == null ? '—' : `${money(Number(value) * 100)}%`
 
@@ -76,7 +77,7 @@ export function buildRequest(draft, base = {}) {
     valuation_date: draft.date, language: draft.language, mode: draft.mode,
     data_source: draft.mode === 'demo' ? 'structured' : draft.source,
     assumption_source: draft.assumptionSource, forecast_years: Number(draft.years),
-    methods: draft.methods, user_goal: draft.language === 'en-US' ? 'Build a traceable company valuation and explain the key assumptions.' : '完成可追溯的企业估值并解释关键假设',
+    methods: draft.methods, discount_policy: draft.mode === 'demo' ? 'annual_midyear_remaining' : 'year_end', user_goal: draft.language === 'en-US' ? 'Build a traceable company valuation and explain the key assumptions.' : '完成可追溯的企业估值并解释关键假设',
     file_ids: draft.mode !== 'demo' && draft.source === 'upload' ? draft.fileIds : [],
     assumption_file_ids: draft.assumptionSource === 'upload' ? draft.assumptionFileIds : [],
   })

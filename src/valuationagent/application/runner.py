@@ -51,6 +51,7 @@ class ValuationRunner:
         self.finance = finance
         self.data = data or LocalDataProvider()
         self._run_clients = {}
+        self._run_data = {}
         self._client_lock = threading.RLock()
         self._pause_events = {}
 
@@ -80,6 +81,19 @@ class ValuationRunner:
         self.store.get_run(run_id)
         with self._client_lock:
             self._run_clients[run_id] = llm
+
+    def attach_data(self, run_id, provider):
+        """Attach an in-memory data provider to one run only.
+
+        Runtime credentials stay outside the persisted request, events and
+        reports. This also prevents one Web research session from changing the
+        provider used by another concurrent run.
+        """
+        self.store.get_run(run_id)
+        if not callable(getattr(provider, "resolve", None)):
+            raise ValueError("A股取数服务配置无效。")
+        with self._client_lock:
+            self._run_data[run_id] = provider
 
     def execute(self, run_id):
         record = self.store.get_run(run_id)
@@ -121,7 +135,7 @@ class ValuationRunner:
                 self.store,
                 self.finance,
                 self._run_clients.get(run_id),
-                self.data,
+                self._run_data.get(run_id, self.data),
                 pause.is_set,
             )
             state = build_workflow(services).invoke(
@@ -188,15 +202,27 @@ class ValuationRunner:
         if "assumptions" in revision.changes:
             # Use the effective uploaded assumptions as the base before switching to manual.
             if parent.result:
-                original["assumptions"] = {
-                    k: getattr(parent.result.assumptions, k)
-                    for k in AssumptionInputs.model_fields
-                }
+                # Preserve advanced request inputs (for example beta and market
+                # rates) and carry forward the four assumptions the model may
+                # already have resolved or the user may have revised.
+                effective_assumptions = dict(original.get("assumptions") or {})
+                for field_name in (
+                    "revenue_growth",
+                    "ebit_margin",
+                    "wacc",
+                    "terminal_growth",
+                ):
+                    effective_assumptions[field_name] = getattr(
+                        parent.result.assumptions, field_name
+                    )
+                original["assumptions"] = effective_assumptions
             original["assumption_source"] = "manual"
             original["assumption_file_ids"] = []
         changed = ValuationRequest.model_validate(merge(original, revision.changes))
         llm = self._run_clients.get(run_id)
         child = self.create_run(changed, llm, parent_id=run_id, reason=revision.reason)
+        if run_id in self._run_data:
+            self.attach_data(child.run_id, self._run_data[run_id])
         self.store.append_event(
             child.run_id,
             type="revision.created",
@@ -253,9 +279,14 @@ class ValuationRunner:
                 + _(a.source)
             )
         if topic == "risks":
-            return _("模型为参考版本，尚待金融团队核准。") + "; ".join(
-                result.warnings or [_("请复核资本成本、终值、同业选择和数据口径。")]
+            model_note = (
+                _("模型为参考版本，尚待金融团队核准。")
+                if record.result.model_version.endswith("-reference")
+                else _("正式模型已接入；请重点复核数据等级、自动降级和市场参数时点。")
             )
+            review_focus = _("请复核资本成本、终值、同业选择和数据口径。")
+            details = [review_focus, *result.warnings]
+            return model_note + " " + "; ".join(details)
         if topic == "relative":
             return "; ".join(
                 f"{v.method.upper()}: {v.per_share_value:.2f}" + _("/股")

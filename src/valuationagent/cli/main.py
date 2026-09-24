@@ -9,7 +9,9 @@ import typer
 from rich.text import Text
 from valuationagent.core.i18n import translator
 from valuationagent.application.runner import ValuationRunner
-from valuationagent.finance.reference import ReferenceFinancialModel
+from valuationagent.application.reporting import ValuationReportExporter
+from valuationagent.market import create_data_provider
+from valuationagent.finance.factory import create_financial_model
 from valuationagent.llm.client import LlmError, OpenAICompatibleClient
 from valuationagent.schemas.models import Language, RevisionInput, ValuationRequest
 from valuationagent.storage.sqlite import SQLiteRunStore
@@ -45,7 +47,9 @@ STYLE = questionary.Style(
 
 def runtime():
     store = SQLiteRunStore(Path(os.getenv("VALUATION_DATA_DIR", "var")))
-    return store, ValuationRunner(store, ReferenceFinancialModel())
+    return store, ValuationRunner(
+        store, create_financial_model(), create_data_provider()
+    )
 
 
 def model(live):
@@ -83,14 +87,23 @@ def autocomplete(title, choices, default=""):
             choices=choices,
             default=default,
             style=STYLE,
-            instruction="↑↓ 选择建议 · 直接输入也可以",
+            # Questionary 2.1 forwards unknown kwargs to PromptSession.
+            # `instruction` is supported by select/checkbox, but not by
+            # autocomplete; bottom_toolbar works across supported versions.
+            bottom_toolbar="输入关键词筛选 · ↑↓ 选择 · Enter 确认",
         )
     )
 
 
 def secret_input(title):
     """Read a secret without echoing it to the terminal or storing it."""
-    return ask(questionary.password(title, style=STYLE, instruction="输入后不会回显"))
+    return ask(
+        questionary.password(
+            title,
+            style=STYLE,
+            bottom_toolbar="输入后不会回显",
+        )
+    )
 
 
 def read_request(path):
@@ -322,6 +335,7 @@ def wizard(
                         _("DCF · 现金流折现"), value="dcf", checked=True
                     ),
                     questionary.Choice(_("P/E · 市盈率"), value="pe", checked=True),
+                    questionary.Choice(_("P/S · 市销率"), value="ps", checked=False),
                     questionary.Choice(
                         _("EV/EBITDA · 企业价值倍数"), value="ev_ebitda", checked=True
                     ),
@@ -331,7 +345,10 @@ def wizard(
             )
         )
         base["forecast_years"] = int(
-            select(_("07 / 预测期"), ["5", "3", "7", "10"], language)
+            select(_("07 / 预测期"), ["10", "5", "3", "7"], language)
+        )
+        base["discount_policy"] = (
+            "annual_midyear_remaining" if mode == "demo" else "year_end"
         )
         req = ValuationRequest.model_validate(base)
         console.print(
@@ -591,7 +608,7 @@ def inspect(run_id: str, tools: bool = typer.Option(False, "--tools")):
 
 @app.command()
 def export(run_id: str, destination: Path = typer.Option(..., "--output", "-o")):
-    """导出含版本、数据、假设、结果及工具证据的 JSON 复算包。"""
+    """按文件扩展名导出 JSON 复算包、Excel 工作簿或 PDF 正式报告。"""
     store, _ = runtime()
     try:
         record = store.get_run(run_id)
@@ -599,14 +616,19 @@ def export(run_id: str, destination: Path = typer.Option(..., "--output", "-o"))
             raise ValueError("该任务尚未形成结果，请先复核或恢复。")
         if destination.exists():
             raise ValueError("目标文件已存在，请指定新文件名。")
-        payload = {
-            "run": record.model_dump(mode="json"),
-            "artifacts": store.artifacts(run_id),
-            "events": [e.model_dump(mode="json") for e in store.list_events(run_id)],
-        }
-        destination.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        extension = destination.suffix.lower().lstrip(".") or "json"
+        if extension == "json":
+            payload = {
+                "run": record.model_dump(mode="json"),
+                "artifacts": store.artifacts(run_id),
+                "events": [e.model_dump(mode="json") for e in store.list_events(run_id)],
+            }
+            destination.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        else:
+            content, _, _ = ValuationReportExporter().export(record, extension)
+            destination.write_bytes(content)
         console.print(Text(f"已导出：{destination.resolve()}", style="good"))
     except KeyError:
         friendly_error(ValueError("任务不存在。"))

@@ -1,10 +1,12 @@
 import json
+from datetime import date
 from io import BytesIO
 from unittest.mock import patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
+from pydantic import ValidationError
 from typer.testing import CliRunner
 from valuationagent.api.main import create_app
 from valuationagent.application.research import ResearchService
@@ -13,6 +15,7 @@ from valuationagent.cli.main import app, interactive
 from valuationagent.core.documents import parse_document
 from valuationagent.core.tools import NoArguments, ToolSpec
 from valuationagent.llm.client import LlmError, OpenAICompatibleClient
+from valuationagent.schemas.agent import SearchResult
 from valuationagent.schemas.models import ModelConnectionInput
 from valuationagent.schemas.research import FactCandidate, ResearchTurn
 from valuationagent.storage.sqlite import SQLiteRunStore
@@ -47,6 +50,103 @@ def upload(store):
         "2025 年合并报表，单位万元。营业收入：12000。".encode())["file_id"]
 
 
+def test_candidate_input_tolerates_common_scope_labels_and_adjacent_columns(service):
+    text = "2025 年合并报表，单位元。资本开支 1,286,898,447.55 1,550,236,879.62"
+    fid = service.store.save_upload(
+        "现金流.txt", "historical_financials", "text/plain", text.encode()
+    )["file_id"]
+    model = ScriptedModel([("propose_facts", {"candidates": [{
+        "metric": "capital_expenditure",
+        "raw_value": "1,286,898,447.55",
+        "unit": "人民币元",
+        "period": "2025年度",
+        "scope": "合并（上市公司）",
+        "block_id": fid + ":1",
+        "quote": text,
+    }]})])
+    session = service.create(llm=model)
+    state = service.turn(session.session_id, ResearchTurn(content="提取资本开支", file_ids=[fid]))
+    assert state["session"]["facts"][0]["scope"] == "consolidated"
+    assert state["session"]["facts"][0]["unit"] == "元"
+    assert state["session"]["question"]["kind"] == "facts"
+
+
+def test_failed_search_stops_before_a_second_llm_call(service):
+    class FailedSearch:
+        provider_id = "failed-test"
+        version = "1"
+
+        def search(self, query):
+            return SearchResult(
+                query=query,
+                provider=self.provider_id,
+                status="failed",
+                error_code="SEARCH_AUTH_FAILED",
+                error_message="Tavily API Key 无效或无权访问，请重新配置 Tavily Key。",
+            )
+
+    model = ScriptedModel([("search_sources", {
+        "query": "测试公司 年报", "reason": "缺少年报",
+    })])
+    session = service.create(llm=model)
+    session.data_source_preference = "online"
+    service.store.save_research(session)
+    service.attach_search(session.session_id, FailedSearch())
+    state = service.turn(session.session_id, ResearchTurn(content="联网找年报"))
+    assert len(model.calls) == 1
+    assert state["session"]["question"]["kind"] == "search_failed"
+    assert "没有把失败结果交给模型继续猜测" in state["messages"][-1]["content"]
+
+
+def test_ambiguous_multi_value_candidate_is_isolated_without_losing_valid_fact(service):
+    text = "2025 年合并报表，单位元。营业收入 12000。资本开支 100 90"
+    fid = service.store.save_upload(
+        "年报.txt", "historical_financials", "text/plain", text.encode()
+    )["file_id"]
+    model = ScriptedModel([("propose_facts", {"candidates": [
+        {
+            "metric": "revenue", "raw_value": "12000", "unit": "元",
+            "period": "2025", "scope": "consolidated", "block_id": fid + ":1",
+            "quote": "2025 年合并报表，单位元。营业收入 12000。",
+        },
+        {
+            "metric": "capital_expenditure", "raw_value": "100 90", "unit": "元",
+            "period": "unknown", "scope": "unknown", "block_id": fid + ":1",
+            "quote": "资本开支 100 90",
+        },
+    ]})])
+    session = service.create(llm=model)
+    state = service.turn(session.session_id, ResearchTurn(content="提取", file_ids=[fid]))
+    assert [fact["metric"] for fact in state["session"]["facts"]] == ["revenue"]
+    assert any("包含多个数字" in gap for gap in state["session"]["gaps"])
+    assert "隔离" in state["messages"][-1]["content"]
+
+
+def test_online_ticker_preparation_excludes_unconfirmed_search_candidates(service):
+    session = service.create()
+    session.data_source_preference = "online"
+    session.draft = session.draft.model_copy(update={
+        "company": "测试公司", "ticker": "600519.SH",
+        "valuation_date": date(2026, 9, 23), "methods": ["dcf"],
+    })
+    session.facts.append(FactCandidate(
+        fact_id="fact_pending", metric="营业收入", raw_value="12000", unit="万元",
+        normalized_value="120000000", period="unknown", scope="unknown",
+        block_id="message:note", quote="营业收入 12000 万元",
+        warnings=["期间待确认"],
+    ))
+    session.gaps = ["搜索摘要年份仍需核对"]
+    service.store.save_research(session)
+
+    state = service.turn(session.session_id, ResearchTurn(content="/prepare"))
+    assert state["session"]["status"] == "ready_for_valuation"
+    assert state["session"]["facts"][0]["status"] == "proposed"
+    assert "不会进入正式计算" in state["messages"][-1]["content"]
+    request = service.valuation_assembler.build(service.store.get_research(session.session_id))
+    assert request.data_source == "ticker"
+    assert request.financials is None
+
+
 def test_research_starts_incomplete_and_requires_explicit_selection(service):
     session = service.create()
     result = service.turn(session.session_id, ResearchTurn(content="/company 测试公司"))
@@ -56,6 +156,10 @@ def test_research_starts_incomplete_and_requires_explicit_selection(service):
     assert result["session"]["draft"]["company"] == ""
     result = service.turn(session.session_id, ResearchTurn(question_id=question["question_id"], option_id="accept"))
     assert result["session"]["draft"]["company"] == "测试公司"
+    assert result["session"]["question"]["kind"] == "data_source"
+    assert [option["id"] for option in result["session"]["question"]["options"]] == [
+        "online", "upload",
+    ]
     assert service.store.list_runs() == []
     before = len(result["messages"])
     with pytest.raises(ValueError, match="失效"):
@@ -95,6 +199,7 @@ def test_file_llm_tool_evidence_and_confirmation_survive_restart(service):
     fact = state["session"]["facts"][0]
     assert fact["status"] == "proposed" and fact["normalized_value"] == "120000000"
     assert state["session"]["documents"][0]["block_count"] == 1
+    assert state["session"]["data_source_preference"] == "upload"
     assert len(state["session"]["documents"][0]["sha256"]) == 64
     assert "PRIVATE_TEST_REASONING" not in json.dumps(state)
     # Reasoning survives only within the ephemeral protocol loop.
@@ -249,6 +354,11 @@ def test_repeated_identical_tool_failure_stops_and_asks_user(service):
     assert state["session"]["facts"] == []
     assert state["session"]["last_issue"]["code"] == "AGENT_NO_PROGRESS"
     assert state["session"]["question"]["kind"] == "recovery"
+    assert [choice["id"] for choice in state["session"]["question"]["options"]] == [
+        "retry", "revise", "defer",
+    ]
+    assert "最近失败原因" in state["messages"][-1]["content"]
+    assert "候选数值未出现在引用原文" in state["messages"][-1]["content"]
     assert any(event["type"] == "tool.failed" for event in state["events"])
 
 
@@ -258,7 +368,10 @@ def test_uncertain_fields_are_not_blanket_confirmed(service):
     session = service.create(llm=model)
     result = service.turn(session.session_id, ResearchTurn(content="提取", file_ids=[fid]))
     qid = result["session"]["question"]["question_id"]
-    result = service.turn(session.session_id, ResearchTurn(question_id=qid, option_id="accept"))
+    assert [option["id"] for option in result["session"]["question"]["options"]] == [
+        "defer", "reject",
+    ]
+    result = service.turn(session.session_id, ResearchTurn(question_id=qid, option_id="defer"))
     assert result["session"]["facts"][0]["status"] == "proposed"
 
 
@@ -307,12 +420,34 @@ def test_partial_scope_update_preserves_other_fields_and_refreshes_gaps(service)
 
 
 def test_search_gap_does_not_fabricate_peers(service):
-    model = ScriptedModel([("search_sources", {"query": "可比公司", "reason": "可比公司不足"})])
+    action = ("search_sources", {"query": "可比公司", "reason": "可比公司不足"})
+    model = ScriptedModel([action, action])
     session = service.create(llm=model)
     result = service.turn(session.session_id, ResearchTurn(content="帮我补充同业"))
+    assert result["session"]["question"]["kind"] == "data_source"
+    assert result["session"]["facts"] == []
+    assert "没有发出网络请求" in result["messages"][-1]["content"]
+
+    question = result["session"]["question"]
+    result = service.turn(session.session_id, ResearchTurn(
+        question_id=question["question_id"], option_id="online"
+    ))
     assert result["session"]["question"]["kind"] == "search_unavailable"
     assert result["session"]["facts"] == []
     assert "没有发出网络请求" in result["messages"][-1]["content"]
+    assert "未配置 Tavily API Key" in result["messages"][-1]["content"]
+
+
+def test_search_provider_can_be_attached_to_one_session_without_persisting_key(service):
+    from valuationagent.search.providers import MockSearchProvider
+
+    session = service.create()
+    provider = MockSearchProvider()
+    service.attach_search(session.session_id, provider)
+    assert service._search_clients[session.session_id] is provider
+    event = service.store.list_events(session.session_id)[-1]
+    assert event.type == "search.attached"
+    assert event.payload == {"provider": "mock-search", "provider_version": "0.1"}
 
 
 def test_llm_receives_source_ambiguity_contract_and_free_text_guidance(service):
@@ -328,13 +463,21 @@ def test_llm_receives_source_ambiguity_contract_and_free_text_guidance(service):
     assert "不得静默修正或合理化" in system_prompt
     assert "不得把数值平移到相邻年份" in system_prompt
     assert "实际发现了什么" in system_prompt
-    assert "用户可以直接输入补充或修改要求" in system_prompt
+    assert "自动提供 Chat 自由输入入口" in system_prompt
     assert result["session"]["question"]["kind"] == "clarification"
     assert [option["label"] for option in result["session"]["question"]["options"]] == [
         "按表头原样保留为 2024",
         "暂不采用这列，等待补充资料",
     ]
-    assert "直接输入你的判断" in result["messages"][-1]["content"]
+    assert "直接输入你的判断" not in result["messages"][-1]["content"]
+
+
+def test_llm_questions_require_two_or_three_actionable_choices():
+    from valuationagent.application.research import FinishResponse
+
+    with pytest.raises(ValidationError, match="2—3"):
+        FinishResponse(answer="需要确认。", question="采用哪个口径？", options=["采用历史口径"])
+    assert FinishResponse(answer="当前没有需要确认的事项。").options == []
 
 
 def test_selected_clarification_preserves_its_question_for_the_next_model_turn(service):
@@ -474,6 +617,37 @@ def test_excel_locations_and_formulas_are_not_executed(service):
     assert "https://" not in blocks[1]["text"]
 
 
+def test_docx_upload_preserves_paragraph_and_table_order(service):
+    from docx import Document
+
+    document = Document()
+    document.add_heading("资本开支假设", level=1)
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "参数"
+    table.cell(0, 1).text = "数值"
+    table.cell(1, 0).text = "alpha"
+    table.cell(1, 1).text = "1.0"
+    document.add_paragraph("表后说明")
+    data = BytesIO()
+    document.save(data)
+
+    meta = service.store.save_upload(
+        "估值方案.docx", "evidence", None, data.getvalue()
+    )
+    blocks, warnings = parse_document(service.store.get_file(meta["file_id"]))
+
+    assert warnings == []
+    assert [block["text"] for block in blocks] == [
+        "资本开支假设",
+        "参数 | 数值",
+        "alpha | 1.0",
+        "表后说明",
+    ]
+    assert blocks[0]["location"]["paragraph"] == 1
+    assert blocks[1]["location"] == {"table": 1, "row": 1}
+    assert blocks[3]["location"]["paragraph"] == 2
+
+
 def test_api_research_sources_are_scoped_and_exports_are_safe(tmp_path):
     with TestClient(create_app(tmp_path)) as client:
         first = client.post("/api/research-sessions", json={"language": "en-US"}).json()["session"]["session_id"]
@@ -496,7 +670,11 @@ def test_cli_opens_conversation_and_confirms_options(tmp_path, monkeypatch, caps
     monkeypatch.setattr("valuationagent.cli.research.configure_model", lambda language: (None, ""))
     answers = iter(["/company Research Company", "/quit"])
     monkeypatch.setattr("valuationagent.cli.main.text_input", lambda *args, **kwargs: next(answers))
-    monkeypatch.setattr("valuationagent.cli.main.select", lambda *args, **kwargs: "accept")
+    def choose_for_cli(*args, **kwargs):
+        values = [getattr(choice, "value", choice) for choice in args[1]]
+        return "online" if "online" in values else "accept"
+
+    monkeypatch.setattr("valuationagent.cli.main.select", choose_for_cli)
     interactive(language="en-US")
     assert "What can I do?" in capsys.readouterr().out
     assert "research" in CliRunner().invoke(app, ["--help"]).output
@@ -518,3 +696,30 @@ def test_deepseek_tool_payload_and_redacted_diagnostics(thinking, expected):
     assert recorded[0]["tool_choice"] == expected
     assert "temperature" not in recorded[0]
     assert "tool_choice" in str(caught.value) and secret not in str(caught.value)
+
+
+def test_llm_timeout_and_invalid_json_have_distinct_recovery_codes():
+    original = httpx.Client
+    config = ModelConnectionInput(
+        base_url="https://example.test/v1", model="test-model", api_key="TEST_ONLY"
+    )
+
+    def timeout_handler(request):
+        raise httpx.ReadTimeout("late", request=request)
+
+    with patch(
+        "valuationagent.llm.client.httpx.Client",
+        side_effect=lambda **kwargs: original(transport=httpx.MockTransport(timeout_handler), **kwargs),
+    ):
+        with pytest.raises(LlmError, match="LLM_TIMEOUT"):
+            OpenAICompatibleClient(config).chat([{"role": "user", "content": "hello"}])
+
+    def invalid_json_handler(request):
+        return httpx.Response(200, content=b"not-json")
+
+    with patch(
+        "valuationagent.llm.client.httpx.Client",
+        side_effect=lambda **kwargs: original(transport=httpx.MockTransport(invalid_json_handler), **kwargs),
+    ):
+        with pytest.raises(LlmError, match="LLM_RESPONSE_INVALID_JSON"):
+            OpenAICompatibleClient(config).chat([{"role": "user", "content": "hello"}])

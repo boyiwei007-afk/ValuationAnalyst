@@ -66,7 +66,7 @@ def test_invalid_terminal_assumption_waits_for_review(tmp_path):
     )
 
 
-def test_unimplemented_ticker_adapter_is_explicit(tmp_path):
+def test_unconfigured_ticker_adapter_is_explicit(tmp_path):
     store, runner = make_runner(tmp_path)
     request = ValuationRequest(
         company=CompanyInput(ticker="600519.SH", name="贵州茅台"),
@@ -79,7 +79,7 @@ def test_unimplemented_ticker_adapter_is_explicit(tmp_path):
 
     assert record.status == RunStatus.WAITING_REVIEW
     assert record.review["code"] == "DATA_INPUT_UNAVAILABLE"
-    assert "尚未接入" in record.review["message"]
+    assert "TUSHARE_TOKEN" in record.review["message"]
 
 
 def test_conversation_explains_assumptions(tmp_path):

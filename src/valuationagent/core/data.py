@@ -5,9 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Protocol
+from pydantic import Field
 from valuationagent.schemas.models import (
     ApiModel,
     AssumptionInputs,
+    CompanyInput,
     EvidenceRef,
     FinancialSnapshot,
     PeerCompany,
@@ -17,10 +19,13 @@ from valuationagent.storage.sqlite import SQLiteRunStore
 
 
 class DataBundle(ApiModel):
+    company: CompanyInput | None = None
     financials: FinancialSnapshot
+    historical_financials: list[FinancialSnapshot] = Field(default_factory=list)
     peers: list[PeerCompany]
     assumptions: AssumptionInputs
-    assumption_evidence: dict[str, list[EvidenceRef]] = {}
+    assumption_evidence: dict[str, list[EvidenceRef]] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DataProvider(Protocol):
@@ -110,7 +115,7 @@ class LocalDataProvider:
             peers = peers or demo_peers()
         elif request.data_source == "ticker":
             raise NotImplementedError(
-                "A 股数据源适配器尚未接入；可提交复核，用结构化财务继续。"
+                "A股在线取数需要配置TUSHARE_TOKEN；也可以改用结构化数据或上传资料。"
             )
         elif request.data_source == "upload":
             payload, meta = self.read_json(
@@ -171,7 +176,9 @@ class LocalDataProvider:
         ):
             raise ValueError("已选择手工假设，但尚未填写任何假设。")
         return DataBundle(
+            company=request.company,
             financials=financials,
+            historical_financials=request.historical_financials,
             peers=peers,
             assumptions=assumptions,
             assumption_evidence=evidence,

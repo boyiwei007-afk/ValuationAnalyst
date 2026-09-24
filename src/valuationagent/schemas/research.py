@@ -9,9 +9,10 @@ from valuationagent.schemas.models import ApiModel, Language
 class ResearchDraft(ApiModel):
     company: str = Field(default="", max_length=200)
     ticker: str = Field(default="", max_length=20)
+    industry: str = Field(default="", max_length=120)
     valuation_date: date | None = None
     objective: str = Field(default="", max_length=2000)
-    methods: list[Literal["dcf", "pe", "ev_ebitda"]] = Field(default_factory=list)
+    methods: list[Literal["dcf", "pe", "ps", "ev_ebitda"]] = Field(default_factory=list)
 
 
 class ResearchChoice(ApiModel):
@@ -45,7 +46,10 @@ class ResearchIssue(ApiModel):
 
 class ResearchQuestion(ApiModel):
     question_id: str
-    kind: Literal["task", "facts", "clarification", "search_unavailable", "recovery"]
+    kind: Literal[
+        "task", "data_source", "facts", "clarification",
+        "search_unavailable", "search_failed", "recovery",
+    ]
     title: str = Field(min_length=1, max_length=600)
     options: list[ResearchChoice] = Field(min_length=1, max_length=4)
     fact_ids: list[str] = Field(default_factory=list)
@@ -84,8 +88,12 @@ class ResearchSession(ApiModel):
     revision: int = 1
     language: Language = Language.ZH_CN
     requires_model: bool = False
+    data_source_preference: Literal["", "online", "upload"] = ""
     draft: ResearchDraft = Field(default_factory=ResearchDraft)
-    status: Literal["collecting", "waiting_confirmation", "awaiting_financial_model"] = "collecting"
+    status: Literal[
+        "collecting", "waiting_confirmation", "awaiting_financial_model",
+        "ready_for_valuation", "submitted"
+    ] = "collecting"
     documents: list[DocumentSummary] = Field(default_factory=list)
     facts: list[FactCandidate] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
@@ -94,9 +102,10 @@ class ResearchSession(ApiModel):
     last_issue: ResearchIssue | None = None
     summary: str = ""
     agent_protocol_version: str = "research-agent-v2"
-    prompt_version: str = "research-2026-09-22.1"
+    prompt_version: str = "research-2026-09-24.1"
     model_provider: str = ""
     model_name: str = ""
+    valuation_run_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

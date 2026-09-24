@@ -118,6 +118,8 @@ class SearchResult(ApiModel):
     provider_version: str = Field(default="", max_length=80)
     status: Literal["completed", "no_results", "failed", "not_configured"]
     hits: list[SearchHit] = Field(default_factory=list, max_length=50)
+    error_code: str | None = Field(default=None, max_length=100)
+    error_message: str = Field(default="", max_length=600)
     warnings: list[str] = Field(default_factory=list, max_length=30)
     searched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

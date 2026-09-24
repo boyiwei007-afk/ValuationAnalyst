@@ -17,14 +17,18 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.sse import EventSourceResponse
 
 from valuationagent.application.runner import ValuationRunner
 from valuationagent.application.research import ResearchService
+from valuationagent.application.reporting import ValuationReportExporter
 from valuationagent.api.research import register_research_routes
-from valuationagent.finance.reference import ReferenceFinancialModel
+from valuationagent.finance.factory import create_financial_model
+from valuationagent.finance.tools import FinanceResearchToolProvider
+from valuationagent.market import create_data_provider
+from valuationagent.search.providers import UnavailableSearchProvider, create_search_provider
 from valuationagent.llm.client import (
     LlmError,
     ModelSessionRegistry,
@@ -60,13 +64,16 @@ TERMINAL_STATUSES = {
 def create_app(data_dir: Path | str | None = None) -> FastAPI:
     runtime_dir = Path(data_dir or os.getenv("VALUATION_DATA_DIR", "var"))
     store = SQLiteRunStore(runtime_dir)
-    finance = ReferenceFinancialModel()
-    runner = ValuationRunner(store, finance)
+    finance = create_financial_model()
+    data_provider = create_data_provider()
+    search_provider = create_search_provider()
+    runner = ValuationRunner(store, finance, data_provider)
     sessions = ModelSessionRegistry()
+    reports = ValuationReportExporter()
 
     app = FastAPI(
         title="ValuationAgent API",
-        version="0.2.0",
+        version="0.5.0",
         description="Shared backend for agent conversation, valuation workflow, audit events and web visualization.",
     )
     origins = [
@@ -87,8 +94,11 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
     app.state.store = store
     app.state.runner = runner
     app.state.sessions = sessions
-    app.state.research = ResearchService(store)
-    register_research_routes(app, app.state.research, sessions)
+    app.state.research = ResearchService(
+        store,
+        search_provider=search_provider,
+        tool_providers=(FinanceResearchToolProvider(),),
+    )
 
     def execute_background(run_id):
         try:
@@ -96,6 +106,10 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
         except ValueError:
             # A concurrent request may already own the execution lease.
             return
+
+    register_research_routes(
+        app, app.state.research, sessions, runner, execute_background
+    )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
@@ -117,7 +131,7 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "valuationagent", "version": "0.2.0"}
+        return {"status": "ok", "service": "valuationagent", "version": "0.5.0"}
 
     @app.get("/api/capabilities", response_model=list[Capability])
     def capabilities() -> list[Capability]:
@@ -147,14 +161,14 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
                 detail="SQLite 审计事件 + SSE 增量流",
             ),
             Capability(
-                capability_id="reference_dcf",
+                capability_id="finance_team_dcf",
                 available=True,
-                detail="透明参考模型，正式使用前需金融团队核准",
+                detail="非金融A股十年收入预测、FCFF、WACC、三情景DCF与敏感性分析",
             ),
             Capability(
-                capability_id="reference_relative",
+                capability_id="finance_team_relative",
                 available=True,
-                detail="P/E 与 EV/EBITDA 参考实现",
+                detail="P/E、P/S 与 EV/EBITDA 独立相对估值及方法差异复核",
             ),
             Capability(
                 capability_id="review_resume_revisions",
@@ -194,12 +208,21 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
             Capability(
                 capability_id="search_provider_contract",
                 available=True,
-                detail="已提供零网络 mock 与未配置状态；真实搜索 provider 待接入",
+                detail="Tavily真实联网搜索、零网络mock与未配置安全降级；结果保留URL、时点与供应商版本",
+            ),
+            Capability(
+                capability_id="web_search_runtime",
+                available=not isinstance(search_provider, UnavailableSearchProvider),
+                detail=(
+                    f"当前进程已连接 {search_provider.provider_id}"
+                    if not isinstance(search_provider, UnavailableSearchProvider)
+                    else "当前进程未配置Tavily API Key；CLI可用/search会话级连接"
+                ),
             ),
             Capability(
                 capability_id="ticker_data_provider",
-                available=False,
-                detail="A 股数据源适配器待接入",
+                available=True,
+                detail="Tushare Pro点时A股年报、每日估值指标及非金融行业可比公司筛选",
             ),
             Capability(
                 capability_id="pdf_excel_extraction",
@@ -208,15 +231,15 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
             ),
             Capability(
                 capability_id="pdf_excel_reporting",
-                available=False,
-                detail="当前输出结构化 JSON；PDF/Excel 导出待接入",
+                available=True,
+                detail="正式估值结果支持JSON、Excel审计工作簿与PDF报告",
             ),
         ]
 
     @app.get("/api/workflow-definition")
     def workflow_definition() -> dict:
         return {
-            "version": "0.2.0",
+            "version": "0.5.0",
             "stages": [
                 {"id": "data_intake", "label": "数据输入", "order": 1, "tone": "cyan"},
                 {
@@ -232,42 +255,48 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
                     "tone": "amber",
                 },
                 {
+                    "id": "industry_parameters",
+                    "label": "行业识别与参数",
+                    "order": 4,
+                    "tone": "cyan",
+                },
+                {
                     "id": "assumption_resolution",
                     "label": "假设形成",
-                    "order": 4,
+                    "order": 5,
                     "tone": "violet",
                 },
                 {
                     "id": "financial_forecast",
                     "label": "经营预测",
-                    "order": 5,
+                    "order": 6,
                     "tone": "cyan",
                 },
                 {
                     "id": "dcf_valuation",
                     "label": "DCF 估值",
-                    "order": 6,
+                    "order": 7,
                     "tone": "green",
                 },
                 {
                     "id": "relative_valuation",
                     "label": "相对估值",
-                    "order": 7,
+                    "order": 8,
                     "tone": "green",
                 },
                 {
                     "id": "sensitivity",
                     "label": "敏感性分析",
-                    "order": 8,
+                    "order": 9,
                     "tone": "amber",
                 },
                 {
                     "id": "reconciliation",
                     "label": "区间验证",
-                    "order": 9,
+                    "order": 10,
                     "tone": "violet",
                 },
-                {"id": "reporting", "label": "结果输出", "order": 10, "tone": "green"},
+                {"id": "reporting", "label": "结果输出", "order": 11, "tone": "green"},
             ],
         }
 
@@ -348,6 +377,21 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
                 },
             )
         return record.result
+
+    @app.get("/api/runs/{run_id}/export")
+    def export_run(run_id: str, format: str = "json"):
+        record = get_run_or_404(run_id)
+        try:
+            content, media_type, extension = reports.export(record, format)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return Response(
+            content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="valuation-{run_id}.{extension}"'
+            },
+        )
 
     @app.get("/api/runs/{run_id}/events/history", response_model=list[RunEvent])
     def event_history(run_id: str, after: int = 0) -> list[RunEvent]:

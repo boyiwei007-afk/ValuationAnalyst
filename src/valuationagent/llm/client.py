@@ -92,9 +92,21 @@ class OpenAICompatibleClient:
             raise LlmError(
                 f"LLM_HTTP_{status}: {category}，请检查模型配置或稍后恢复。{hint}"
             ) from None
-        except (httpx.HTTPError, ValueError):
+        except httpx.TimeoutException:
             raise LlmError(
-                "LLM_CONNECTION_FAILED: 连接超时或响应格式错误，请检查接口地址和网络。"
+                f"LLM_TIMEOUT: 模型服务在 {self.config.timeout_seconds:g} 秒内未返回；当前进度已保留，可以重试。"
+            ) from None
+        except httpx.ConnectError:
+            raise LlmError(
+                "LLM_CONNECTION_FAILED: 无法连接模型服务，请检查接口地址、网络、代理或防火墙。"
+            ) from None
+        except httpx.RequestError:
+            raise LlmError(
+                "LLM_NETWORK_FAILED: 模型请求在传输过程中失败，请检查网络后重试。"
+            ) from None
+        except ValueError:
+            raise LlmError(
+                "LLM_RESPONSE_INVALID_JSON: 模型服务返回的内容不是有效 JSON，请稍后重试或更换接口。"
             ) from None
         try:
             message = body["choices"][0]["message"]

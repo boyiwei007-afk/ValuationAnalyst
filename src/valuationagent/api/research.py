@@ -1,11 +1,25 @@
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from fastapi.responses import Response
+from pydantic import Field, SecretStr
 from valuationagent.application.research_export import build_research_export
-from valuationagent.schemas.models import ResumeInput
+from valuationagent.market import TushareApiClient, TushareDataProvider
+from valuationagent.search.providers import TavilySearchProvider
+from valuationagent.schemas.models import ApiModel, ResumeInput
 from valuationagent.schemas.research import ResearchCreate, ResearchTurn
 
 
-def register_research_routes(app, research, sessions):
+class DataServicesInput(ApiModel):
+    tavily_api_key: SecretStr | None = Field(default=None)
+    tushare_token: SecretStr | None = Field(default=None)
+
+    def has_values(self):
+        return bool(
+            (self.tavily_api_key and self.tavily_api_key.get_secret_value().strip())
+            or (self.tushare_token and self.tushare_token.get_secret_value().strip())
+        )
+
+
+def register_research_routes(app, research, sessions, runner, execute_background):
     def get_session(session_id):
         try:
             return research.store.get_research(session_id)
@@ -51,6 +65,42 @@ def register_research_routes(app, research, sessions):
             research.attach(session_id, get_client(body.model_session_id))
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
+
+    @app.get("/api/research-sessions/{session_id}/data-services")
+    def data_services(session_id: str):
+        get_session(session_id)
+        return research.data_service_status(session_id, default_market=runner.data)
+
+    @app.post("/api/research-sessions/{session_id}/data-services")
+    def attach_data_services(session_id: str, body: DataServicesInput):
+        get_session(session_id)
+        if not body.has_values():
+            raise HTTPException(422, "至少填写一个 Tavily Key 或 Tushare Token。")
+        try:
+            if body.tavily_api_key and body.tavily_api_key.get_secret_value().strip():
+                research.attach_search(
+                    session_id,
+                    TavilySearchProvider(body.tavily_api_key.get_secret_value()),
+                )
+            if body.tushare_token and body.tushare_token.get_secret_value().strip():
+                research.attach_market(
+                    session_id,
+                    TushareDataProvider(TushareApiClient(body.tushare_token.get_secret_value())),
+                )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return research.data_service_status(session_id, default_market=runner.data)
+
+    @app.post("/api/research-sessions/{session_id}/valuation", status_code=202)
+    def submit_valuation(session_id: str, background_tasks: BackgroundTasks):
+        get_session(session_id)
+        try:
+            record = research.submit_valuation(session_id, runner)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        if str(record.status) == "created":
+            background_tasks.add_task(execute_background, record.run_id)
+        return {"run_id": record.run_id, "status": record.status}
 
     @app.get("/api/research-sessions/{session_id}/events")
     def events(session_id: str, after: int = 0):

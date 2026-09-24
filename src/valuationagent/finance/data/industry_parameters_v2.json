@@ -1,0 +1,39 @@
+{
+  "version": "2026-09-22-v2-normalized",
+  "source_file": "行业参数数据库_v2_全行业(1).xlsx",
+  "source_sha256": "C38DFE8E48BF135A9187FF238398CB4B4D6302418B8FC768AEC0110F1881B65D",
+  "metadata_completeness": "partial",
+  "required_metadata_missing": [
+    "observation_start",
+    "observation_end",
+    "sample_size_by_industry",
+    "update_frequency",
+    "parameter_owner",
+    "confidence_interval"
+  ],
+  "rates_are_decimals": true,
+  "financial_industry_supported": false,
+  "industries": [
+    {"id":"electronics","category":"高新技术类","name":"电子 / 计算机 / 半导体","aliases":["电子","计算机","半导体","芯片","软件","信息技术"],"domestic_growth":0.0639,"cycle_label":"3~4","window_years":4,"global_growth_check":0.09,"lifecycle":"成长期","decay_years":8,"rnd_wage_factor":1.14,"admin_wage_factor":0.85,"beta_default":1.4,"quality":"A"},
+    {"id":"pharma","category":"高新技术类","name":"医药 / 生物","aliases":["医药","生物","医疗","制药"],"domestic_growth":-0.0139,"cycle_label":"3~5","window_years":5,"global_growth_check":0.05,"lifecycle":"成长期","decay_years":10,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":0.95,"quality":"B"},
+    {"id":"defense","category":"高新技术类","name":"军工 / 航空航天","aliases":["军工","国防军工","航空航天","船舶"],"domestic_growth":-0.011,"cycle_label":"5~8","window_years":8,"global_growth_check":0.03,"lifecycle":"成熟期","decay_years":7,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.1,"quality":"B"},
+    {"id":"power_equipment","category":"高新技术类","name":"电力设备 / 新能源","aliases":["电力设备","新能源","光伏","锂电","储能"],"domestic_growth":0.0532,"cycle_label":"3~5","window_years":5,"global_growth_check":0.08,"lifecycle":"成长期","decay_years":8,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.4,"quality":"B"},
+    {"id":"machinery","category":"制造业","name":"机械设备","aliases":["机械设备","通用设备","专用设备"],"domestic_growth":0.0065,"cycle_label":"3~4","window_years":4,"global_growth_check":0.041,"lifecycle":"成熟期","decay_years":5,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.1,"quality":"A"},
+    {"id":"automotive","category":"制造业","name":"汽车","aliases":["汽车","汽车制造","汽车零部件"],"domestic_growth":0.036,"cycle_label":"4~5","window_years":5,"global_growth_check":0.03,"lifecycle":"成熟期","decay_years":5,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.15,"quality":"A"},
+    {"id":"chemicals","category":"制造业","name":"化工","aliases":["化工","基础化工","化学原料","化学制品"],"domestic_growth":0.0065,"cycle_label":"4~6","window_years":6,"global_growth_check":0.046,"lifecycle":"成熟期","decay_years":5,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.1,"quality":"B"},
+    {"id":"light_manufacturing","category":"制造业","name":"轻工制造","aliases":["轻工制造","造纸","家具","文教用品"],"domestic_growth":-0.0197,"cycle_label":"3~4","window_years":4,"global_growth_check":0.035,"lifecycle":"成熟期","decay_years":6,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.0,"quality":"B"},
+    {"id":"textile","category":"制造业","name":"纺织服饰制鞋","aliases":["纺织","服饰","服装","制鞋"],"domestic_growth":-0.0719,"cycle_label":"3~4","window_years":4,"global_growth_check":0.035,"lifecycle":"成熟期","decay_years":6,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.0,"quality":"B"},
+    {"id":"construction","category":"制造业","name":"建筑业","aliases":["建筑","建筑装饰","建筑材料","建材"],"domestic_growth":0.0369,"cycle_label":"5~8","window_years":8,"global_growth_check":0.035,"lifecycle":"成熟期","decay_years":5,"rnd_wage_factor":1.2,"admin_wage_factor":0.85,"beta_default":1.05,"quality":"B"},
+    {"id":"nonferrous","category":"制造业","name":"有色金属","aliases":["有色金属","金属冶炼"],"domestic_growth":0.0695,"cycle_label":"5~8","window_years":8,"global_growth_check":0.03,"lifecycle":"成熟期","decay_years":5,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.2,"quality":"B"},
+    {"id":"steel","category":"制造业","name":"钢铁","aliases":["钢铁","黑色金属"],"domestic_growth":0.0248,"cycle_label":"5~8","window_years":8,"global_growth_check":0.015,"lifecycle":"衰退期","decay_years":3,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.2,"quality":"A"},
+    {"id":"industrial_fallback","category":"制造业","name":"工业（兜底）","aliases":["制造业","工业","电气设备","其他制造"],"domestic_growth":0.0514,"cycle_label":"3~4","window_years":4,"global_growth_check":0.03,"lifecycle":"成熟期","decay_years":6,"rnd_wage_factor":1.51,"admin_wage_factor":1.02,"beta_default":1.05,"quality":"A"},
+    {"id":"agriculture","category":"农业 / 资源业","name":"农林牧渔","aliases":["农林牧渔","农业","林业","畜牧","渔业"],"domestic_growth":0.0414,"cycle_label":"4","window_years":4,"global_growth_check":0.03,"lifecycle":"成熟期","decay_years":5,"rnd_wage_factor":1.0,"admin_wage_factor":0.9,"beta_default":0.9,"quality":"A"},
+    {"id":"energy","category":"农业 / 资源业","name":"煤炭 / 石油","aliases":["煤炭","石油石化","石油","天然气","能源开采"],"domestic_growth":0.03,"cycle_label":"5~8","window_years":8,"global_growth_check":0.01,"lifecycle":"衰退期","decay_years":3,"rnd_wage_factor":1.29,"admin_wage_factor":1.05,"beta_default":1.15,"quality":"B"},
+    {"id":"utilities","category":"农业 / 资源业","name":"公用事业","aliases":["公用事业","电力","燃气","水务"],"domestic_growth":0.0823,"cycle_label":"弱周期","window_years":3,"global_growth_check":0.03,"lifecycle":"成熟期","decay_years":7,"rnd_wage_factor":1.16,"admin_wage_factor":0.85,"beta_default":0.75,"quality":"C"},
+    {"id":"retail","category":"销售 / 服务业","name":"商贸零售","aliases":["商贸零售","零售","批发"],"domestic_growth":0.063,"cycle_label":"2~3","window_years":3,"global_growth_check":0.044,"lifecycle":"成熟期","decay_years":6,"rnd_wage_factor":1.26,"admin_wage_factor":0.87,"beta_default":0.95,"quality":"A"},
+    {"id":"hospitality","category":"销售 / 服务业","name":"餐饮旅游","aliases":["餐饮","旅游","酒店","社会服务"],"domestic_growth":0.0553,"cycle_label":"2~4","window_years":4,"global_growth_check":0.04,"lifecycle":"成长期","decay_years":9,"rnd_wage_factor":1.18,"admin_wage_factor":0.95,"beta_default":1.0,"quality":"B"},
+    {"id":"real_estate","category":"销售 / 服务业","name":"房地产","aliases":["房地产","地产"],"domestic_growth":0.0206,"cycle_label":"7~10","window_years":8,"global_growth_check":0.03,"lifecycle":"衰退期","decay_years":3,"rnd_wage_factor":1.37,"admin_wage_factor":0.95,"beta_default":1.2,"quality":"A"},
+    {"id":"transport","category":"销售 / 服务业","name":"交通运输","aliases":["交通运输","物流","港口","航运","航空运输","仓储"],"domestic_growth":0.0672,"cycle_label":"3~5","window_years":5,"global_growth_check":0.035,"lifecycle":"成熟期","decay_years":5,"rnd_wage_factor":1.47,"admin_wage_factor":0.85,"beta_default":0.8,"quality":"B"},
+    {"id":"services_fallback","category":"销售 / 服务业","name":"服务业（兜底）","aliases":["服务业","传媒","通信服务","其他服务"],"domestic_growth":0.0631,"cycle_label":"弱周期","window_years":3,"global_growth_check":0.04,"lifecycle":"成熟期","decay_years":7,"rnd_wage_factor":1.0,"admin_wage_factor":0.9,"beta_default":1.0,"quality":"C"}
+  ]
+}

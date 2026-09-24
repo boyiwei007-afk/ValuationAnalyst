@@ -18,6 +18,7 @@ def run_tool_loop(
     messages = list(messages)
     trace = {"rounds": 0, "tools": [], "tool_errors": 0, "protocol_errors": 0}
     failed_signatures: dict[str, int] = {}
+    last_failure = ""
     for round_index in range(1, max_rounds + 1):
         trace["rounds"] = round_index
         reply = llm.chat(messages, tools=registry.schemas(), tool_choice="required", max_tokens=max_tokens)
@@ -77,11 +78,18 @@ def run_tool_loop(
         except ValidationError as exc:
             trace["tool_errors"] += 1
             fields = [".".join(str(part) for part in error["loc"]) for error in exc.errors(include_input=False)]
+            details = [
+                f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                for error in exc.errors(include_input=False)
+            ]
+            last_failure = "；".join(details[:8])
             result = {
                 "ok": False,
                 "error": {
                     "code": "TOOL_ARGUMENTS_INVALID",
-                    "message": "工具参数不符合 schema，请修正字段后重试。",
+                    "message": "工具参数不符合 schema，请按枚举和值域修正后重试。" + (
+                        " 具体错误：" + last_failure if last_failure else ""
+                    ),
                     "fields": fields[:12],
                     "recoverable": True,
                 },
@@ -89,6 +97,7 @@ def run_tool_loop(
         except ValueError as exc:
             trace["tool_errors"] += 1
             message = str(exc).strip()[:1000] or "工具前置条件不满足。"
+            last_failure = message
             result = {
                 "ok": False,
                 "error": {
@@ -113,5 +122,6 @@ def run_tool_loop(
             if failed_signatures[signature] >= 2:
                 raise LlmError(
                     "AGENT_NO_PROGRESS: 同一工具调用连续失败，已停止自动重试并保留当前进度。"
+                    + (" 最近一次错误：" + last_failure if last_failure else "")
                 )
     raise LlmError("AGENT_STEP_LIMIT: 未在限定步骤内提交有效决策，请复核后重试。")

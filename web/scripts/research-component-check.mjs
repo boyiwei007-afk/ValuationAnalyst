@@ -87,14 +87,15 @@ try {
   pass('Untrusted HTML, dangerous links and remote images cannot become executable/loading elements')
 
   const card = mount()
-  const choices = []
-  await render(card.root, ConfirmationCard, { question, t, busy: false, onAnswer: answer => choices.push(answer), onFreeText: noop })
+  const choices = [], freeText = []
+  await render(card.root, ConfirmationCard, { question, t, busy: false, onAnswer: answer => choices.push(answer), onFreeText: questionId => freeText.push(questionId) })
   const group = card.host.querySelector('[role="radiogroup"]')
   assert.equal(group.getAttribute('aria-label'), question.title)
   const radios = [...group.querySelectorAll('[role="radio"]')]
-  assert.equal(radios.length, 3)
-  assert.deepEqual(radios.map(radio => radio.getAttribute('aria-checked')), ['false', 'false', 'false'])
-  assert.deepEqual(radios.map(radio => radio.tabIndex), [0, -1, -1])
+  assert.equal(radios.length, 4)
+  assert.equal(radios.at(-1).textContent.includes('Chat'), true)
+  assert.deepEqual(radios.map(radio => radio.getAttribute('aria-checked')), ['false', 'false', 'false', 'false'])
+  assert.deepEqual(radios.map(radio => radio.tabIndex), [0, -1, -1, -1])
   assert.equal(card.host.querySelector('.button.primary').disabled, true)
   await act(async () => { radios[0].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
   assert.equal(radios[1].getAttribute('aria-checked'), 'true')
@@ -102,6 +103,8 @@ try {
   assert.equal(document.activeElement, radios[1])
   await click(card.host.querySelector('.button.primary'))
   assert.deepEqual(choices, [{ question_id: question.question_id, option_id: 'revise' }])
+  await click(radios.at(-1))
+  assert.deepEqual(freeText, [question.question_id])
   await render(card.root, ConfirmationCard, { question, t, busy: true, onAnswer: noop, onFreeText: noop })
   assert.ok([...card.host.querySelectorAll('button')].every(button => button.disabled))
   pass('Confirmation radios expose state, support arrow-key focus and block submission while busy')

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "valuationagent"
-version = "0.2.0"
+version = "0.5.0"
 description = "Traceable valuation-agent backend for DCF and relative valuation workflows"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,13 +22,17 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
-documents = ["openpyxl>=3.1", "pypdf>=5"]
+documents = ["openpyxl>=3.1", "pypdf>=5", "python-docx>=1.1", "reportlab>=4.2"]
+reports = ["openpyxl>=3.1", "reportlab>=4.2"]
 
 [project.scripts]
 valuationagent = "valuationagent.cli.main:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+valuationagent = ["finance/data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

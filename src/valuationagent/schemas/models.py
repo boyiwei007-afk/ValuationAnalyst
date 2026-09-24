@@ -21,7 +21,6 @@ from pydantic import (
     model_validator,
 )
 
-
 JsonDecimal = Annotated[
     Decimal,
     PlainSerializer(lambda value: str(value), return_type=str, when_used="json"),
@@ -71,6 +70,7 @@ class RunStatus(StrEnum):
 class ValuationMethod(StrEnum):
     DCF = "dcf"
     PE = "pe"
+    PS = "ps"
     EV_EBITDA = "ev_ebitda"
 
 
@@ -116,15 +116,33 @@ class FinancialSnapshot(ApiModel):
     unit: Literal["base_currency"] = "base_currency"
     statement_scope: Literal["consolidated", "parent"] = "consolidated"
     published_at: date | None = None
+    tax_policy: str | None = Field(default=None, max_length=200)
+    tax_policy_expiry_year: int | None = Field(default=None, ge=2000, le=2200)
+    comparability_status: Literal[
+        "comparable", "adjusted", "review_required", "excluded"
+    ] = "comparable"
+    comparability_note: str = Field(default="", max_length=1000)
     evidence: dict[str, list[EvidenceRef]] = Field(default_factory=dict)
     statement_items: dict[str, JsonDecimal] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def comparability_change_requires_note(self) -> "FinancialSnapshot":
+        if self.comparability_status != "comparable" and not self.comparability_note.strip():
+            raise ValueError("non-comparable financial years require comparability_note")
+        return self
 
 
 class PeerCompany(ApiModel):
     ticker: str
     name: str
     pe: JsonDecimal | None = Field(default=None, gt=0)
+    ps: JsonDecimal | None = Field(default=None, gt=0)
     ev_ebitda: JsonDecimal | None = Field(default=None, gt=0)
+    market_cap: JsonDecimal | None = Field(default=None, gt=0)
+    revenue_growth: JsonDecimal | None = None
+    ebit_margin: JsonDecimal | None = None
+    selection_score: JsonDecimal | None = Field(default=None, ge=0)
+    peer_tier: Literal["core", "broad", "user"] = "user"
     rationale: str = "user-provided comparable"
 
 
@@ -135,6 +153,31 @@ class AssumptionInputs(ApiModel):
     terminal_growth: JsonDecimal | None = Field(
         default=None, ge=Decimal("-0.1"), lt=Decimal("0.2")
     )
+    terminal_tax_rate: JsonDecimal | None = Field(default=None, ge=0, le=Decimal("0.4"))
+    risk_free_rate: JsonDecimal | None = Field(default=None, ge=0, lt=Decimal("0.2"))
+    equity_risk_premium: JsonDecimal | None = Field(default=None, gt=0, lt=Decimal("0.3"))
+    beta: JsonDecimal | None = Field(default=None, gt=0, lt=Decimal("5"))
+    debt_cost: JsonDecimal | None = Field(default=None, ge=0, lt=Decimal("0.5"))
+    market_cap: JsonDecimal | None = Field(default=None, gt=0)
+    quarterly_average_market_cap: JsonDecimal | None = Field(default=None, gt=0)
+    annual_average_market_cap: JsonDecimal | None = Field(default=None, gt=0)
+    market_cap_period_low: JsonDecimal | None = Field(default=None, gt=0)
+    market_cap_period_high: JsonDecimal | None = Field(default=None, gt=0)
+    capex_alpha: JsonDecimal | None = Field(default=None, ge=0, le=Decimal("5"))
+    capex_kappa: JsonDecimal | None = Field(
+        default=None, ge=Decimal("-5"), le=Decimal("5")
+    )
+    dso_days: JsonDecimal | None = Field(default=None, ge=0, le=Decimal("730"))
+    dio_days: JsonDecimal | None = Field(default=None, ge=0, le=Decimal("730"))
+    dpo_days: JsonDecimal | None = Field(default=None, ge=0, le=Decimal("730"))
+    operating_cost_ratio: JsonDecimal | None = Field(
+        default=None, ge=0, le=Decimal("2")
+    )
+    operating_cash_ratio: JsonDecimal | None = Field(
+        default=None, ge=0, le=Decimal("0.2")
+    )
+    exit_multiple: JsonDecimal | None = Field(default=None, gt=0, le=Decimal("100"))
+    tax_transition_years: int | None = Field(default=None, ge=0, le=10)
 
     @field_validator("revenue_growth", "ebit_margin")
     @classmethod
@@ -168,7 +211,9 @@ class ValuationRequest(ApiModel):
     file_ids: list[str] = Field(default_factory=list)
     assumption_file_ids: list[str] = Field(default_factory=list)
     assumption_evidence: dict[str, list[EvidenceRef]] = Field(default_factory=dict)
-    discount_policy: Literal["annual_midyear_remaining"] = "annual_midyear_remaining"
+    discount_policy: Literal["annual_midyear_remaining", "year_end"] = (
+        "annual_midyear_remaining"
+    )
     user_goal: str = "完成可追溯的企业估值并解释关键假设"
 
     def agent_parameters(self) -> dict[str, Any]:
@@ -218,7 +263,7 @@ class ModelConnectionInput(ApiModel):
     base_url: str = "https://api.openai.com/v1"
     model: str = Field(min_length=1)
     api_key: SecretStr = Field(min_length=1)
-    timeout_seconds: float = Field(default=45.0, gt=1, le=180)
+    timeout_seconds: float = Field(default=90.0, gt=1, le=180)
     thinking: Literal["auto", "enabled", "disabled"] = "auto"
 
     @field_validator("base_url")
@@ -260,11 +305,14 @@ class ForecastYear(ApiModel):
     revenue_growth: JsonDecimal
     ebit_margin: JsonDecimal
     ebit: JsonDecimal
+    tax_rate: JsonDecimal | None = None
     nopat: JsonDecimal
     depreciation_amortization: JsonDecimal
     capital_expenditure: JsonDecimal
     change_operating_nwc: JsonDecimal
     fcff: JsonDecimal
+    operating_items: dict[str, JsonDecimal] = Field(default_factory=dict)
+    calculation_methods: dict[str, str] = Field(default_factory=dict)
 
 
 class AssumptionSet(ApiModel):
@@ -274,6 +322,14 @@ class AssumptionSet(ApiModel):
     terminal_growth: JsonDecimal
     source: str
     rationale: dict[str, str]
+    revenue_growth_scenarios: dict[str, list[JsonDecimal]] = Field(default_factory=dict)
+    ebit_margin_scenarios: dict[str, list[JsonDecimal]] = Field(default_factory=dict)
+    tax_rate_path: list[JsonDecimal] = Field(default_factory=list)
+    wacc_components: dict[str, JsonDecimal] = Field(default_factory=dict)
+    industry_parameters: dict[str, Any] = Field(default_factory=dict)
+    model_decisions: list[str] = Field(default_factory=list)
+    operating_drivers: dict[str, JsonDecimal] = Field(default_factory=dict)
+    calculation_methods: dict[str, str] = Field(default_factory=dict)
 
 
 class DcfResult(ApiModel):
@@ -286,15 +342,28 @@ class DcfResult(ApiModel):
     terminal_value_share: JsonDecimal
     bridge: dict[str, JsonDecimal]
     scenario_warnings: list[str] = Field(default_factory=list)
+    scenario_values: dict[str, JsonDecimal] = Field(default_factory=dict)
+    present_value_explicit: JsonDecimal | None = None
+    present_value_terminal: JsonDecimal | None = None
+    terminal_value: JsonDecimal | None = None
+    implied_exit_multiple: JsonDecimal | None = None
+    exit_multiple_cross_check: JsonDecimal | None = None
+    exit_multiple_per_share: JsonDecimal | None = None
+    terminal_method_gap: JsonDecimal | None = None
 
 
 class MultipleResult(ApiModel):
-    method: Literal["pe", "ev_ebitda"]
+    method: Literal["pe", "ps", "ev_ebitda"]
     status: Literal["success", "not_applicable"]
     per_share_value: JsonDecimal | None = None
     range_low: JsonDecimal | None = None
     range_high: JsonDecimal | None = None
     sample_size: int = 0
+    original_sample_size: int = 0
+    outlier_count: int = 0
+    sample_quality: Literal["adequate", "limited", "insufficient"] = "insufficient"
+    statistic: str = "P25/P50/P75"
+    peer_tickers: list[str] = Field(default_factory=list)
     reason: str | None = None
 
 
@@ -305,12 +374,41 @@ class SensitivityCell(ApiModel):
     valid: bool
 
 
+class SensitivityStudy(ApiModel):
+    study_id: str
+    parameter: str
+    baseline_input: str
+    low_input: str = ""
+    high_input: str = ""
+    baseline_per_share: JsonDecimal | None = None
+    low_per_share: JsonDecimal | None = None
+    high_per_share: JsonDecimal | None = None
+    max_relative_change: JsonDecimal | None = None
+    classification: Literal["high", "medium", "low", "not_available"]
+    status: Literal["completed", "not_available"]
+    rationale: str = ""
+
+
 class ReconciliationResult(ApiModel):
     dcf_range: tuple[JsonDecimal, JsonDecimal] | None
     relative_range: tuple[JsonDecimal, JsonDecimal] | None
     overlap_range: tuple[JsonDecimal, JsonDecimal] | None
     conclusion: str
     combined_range: None = None
+    method_comparison: dict[str, str] = Field(default_factory=dict)
+
+
+class DataQualityAssessment(ApiModel):
+    historical_years: int = 0
+    comparable_years: int = 0
+    adjusted_years: list[int] = Field(default_factory=list)
+    excluded_years: list[int] = Field(default_factory=list)
+    evidence_coverage: JsonDecimal = Decimal(0)
+    industry_parameter_quality: str = "unknown"
+    industry_metadata_completeness: str = "unknown"
+    peer_sample_quality: str = "not_requested"
+    confidence: Literal["high", "medium", "low"] = "low"
+    notes: list[str] = Field(default_factory=list)
 
 
 class ValuationOutput(ApiModel):
@@ -333,7 +431,9 @@ class ValuationOutput(ApiModel):
     dcf: DcfResult | None
     relative: list[MultipleResult]
     sensitivity: list[SensitivityCell]
+    sensitivity_studies: list[SensitivityStudy] = Field(default_factory=list)
     reconciliation: ReconciliationResult
+    data_quality: DataQualityAssessment = Field(default_factory=DataQualityAssessment)
     executive_summary: str
     warnings: list[str] = Field(default_factory=list)
 
@@ -380,7 +480,7 @@ class RunRecord(ApiModel):
     status: RunStatus
     request: ValuationRequest
     input_hash: str
-    workflow_version: str = "0.2.0"
+    workflow_version: str = "0.5.0"
     root_run_id: str | None = None
     parent_run_id: str | None = None
     revision: int = 1

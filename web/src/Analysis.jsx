@@ -39,6 +39,10 @@ export function Sensitivity({ result, t }) {
   if (!grid.rows.length) return null
   const values = grid.valid.map(cell => Number(cell.per_share_value))
   const low = Math.min(...values), high = Math.max(...values)
+  const studies = result.sensitivity_studies || []
+  const completedStudies = studies.filter(study => study.status === 'completed' && study.max_relative_change != null).sort((a, b) => Number(b.max_relative_change) - Number(a.max_relative_change))
+  const maxImpact = Math.max(0.0001, ...completedStudies.map(study => Number(study.max_relative_change)))
+  const unavailableCount = studies.filter(study => study.status === 'not_available').length
   const selectedCell = grid.byKey.get(selected) || grid.valid.find(cell => Math.abs(Number(cell.wacc) - Number(result.assumptions.wacc)) < 1e-8 && Math.abs(Number(cell.terminal_growth) - Number(result.assumptions.terminal_growth)) < 1e-8) || grid.valid[0]
   return <Card title={t('敏感性分析', 'Sensitivity analysis')} subtitle={`WACC × ${t('永续增长率', 'terminal growth')} · ${result.currency} / ${t('股', 'share')}`}>
     <div className="heat-caption">{t('列：永续增长率 g · 行：WACC', 'Columns: terminal growth g · Rows: WACC')}</div><div className="table-scroll"><table className="heatmap"><thead><tr><th>WACC / g</th>{grid.columns.map(value => <th key={value}>{percent(value)}</th>)}</tr></thead><tbody>{grid.rows.map(wacc => <tr key={wacc}><th>{percent(wacc)}</th>{grid.columns.map(growth => {
@@ -51,13 +55,24 @@ export function Sensitivity({ result, t }) {
     })}</tr>)}</tbody></table></div><div className="heat-legend"><span>{t('低', 'Low')}</span><i/><span>{t('高', 'High')}</span><small>{t('颜色代表每股估值', 'Color = value per share')}</small></div>
     {selectedCell && <div className="heat-selection"><div><small>WACC {percent(selectedCell.wacc)} · g {percent(selectedCell.terminal_growth)}</small><strong>{selectedCell.valid ? `${money(selectedCell.per_share_value)} ${result.currency}` : t('无效组合', 'Invalid combination')}</strong></div><span>{t('情景值 / 股', 'Scenario / share')}</span></div>}
     <p className="field-hint">{t('点击格子查看情景，不会改动本次假设。修改假设请在对话中提出。', 'Select a cell to inspect a scenario. To change assumptions, use the conversation.')}</p>
+    {!!studies.length && <div className="sensitivity-catalogue"><div className="catalogue-heading"><div><b>{t('S1–S20 完整性目录', 'S1–S20 coverage')}</b><small>{t(`${completedStudies.length} 项已重算 · ${unavailableCount} 项缺少输入`, `${completedStudies.length} recalculated · ${unavailableCount} missing inputs`)}</small></div><span>{t('影响按绝对变动排序', 'Sorted by absolute impact')}</span></div>{completedStudies.map(study => <div className="impact-row" key={study.study_id}><span>{study.study_id}</span><div><b>{study.parameter}</b><i><em style={{ width: `${Math.max(2, Number(study.max_relative_change) / maxImpact * 100)}%` }}/></i></div><strong>{percent(study.max_relative_change)}</strong><small className={`impact-${study.classification}`}>{study.classification}</small></div>)}{unavailableCount > 0 && <details className="data-details unavailable-studies"><summary>{t('查看未测试项目及原因', 'View unavailable studies')}</summary>{studies.filter(study => study.status === 'not_available').map(study => <p key={study.study_id}><b>{study.study_id} · {study.parameter}</b><span>{study.rationale}</span></p>)}</details>}</div>}
   </Card>
+}
+
+function QualityCard({ result, t }) {
+  const quality = result.data_quality
+  if (!quality) return null
+  const confidence = {
+    high: t('高', 'High'), medium: t('中', 'Medium'), low: t('低', 'Low'),
+  }[quality.confidence] || quality.confidence
+  return <Card title={t('数据质量与适用边界', 'Data quality & scope')} subtitle={t('结果置信度来自历史可比性、证据、行业参数和可比样本', 'Confidence reflects history, evidence, industry inputs and peer samples')} extra={<Icon name="shield" size={18}/>}> <dl className="fact-list"><div><dt>{t('总体置信度', 'Overall confidence')}</dt><dd>{confidence}</dd></div><div><dt>{t('可比历史', 'Comparable history')}</dt><dd>{quality.comparable_years} / {quality.historical_years} {t('年', 'years')}</dd></div><div><dt>{t('证据覆盖', 'Evidence coverage')}</dt><dd>{percent(quality.evidence_coverage)}</dd></div><div><dt>{t('同业样本', 'Peer sample')}</dt><dd>{quality.peer_sample_quality}</dd></div></dl>{(quality.notes || []).map((note, index) => <p className="warning-line" key={index}><Icon name="alert" size={16}/>{note}</p>)}</Card>
 }
 
 export function Results({ record, t, compact = false }) {
   if (!record?.result) return <Empty title={t('估值结果将在这里呈现', 'Your valuation will appear here')}>{t('开始研究后，可比较估值区间、查看经营预测和敏感性分析。', 'Start a study to compare ranges, forecasts and sensitivity.')}</Empty>
   const result = record.result
-  return <div className={compact ? 'analysis-stack' : 'analysis-grid'}><div className="result-metrics"><div><small>{t('DCF 基准 / 股', 'DCF base / share')}</small><strong>{money(result.dcf?.per_share_value)}</strong><span>{result.currency} · {t('参考模型', 'Reference model')}</span></div><div><small>WACC / g</small><strong className="small-number">{percent(result.assumptions.wacc)} <em>/</em> {percent(result.assumptions.terminal_growth)}</strong><span>{result.forecast.length} {t('年预测期', 'forecast years')}</span></div></div><RangeChart result={result} t={t}/><ForecastChart result={result} t={t}/><Sensitivity result={result} t={t}/><Card title={t('研究说明', 'Research notes')}><p className="report-text">{result.executive_summary}</p>{result.warnings.map((warning, index) => <p className="warning-line" key={index}><Icon name="alert" size={16}/>{warning}</p>)}<div className="source-footer"><span>{result.mode.toUpperCase()} · {result.model_version}</span><span>v{record.revision}</span></div></Card></div>
+  const formalModel = result.model_version.includes('finance-team')
+  return <div className={compact ? 'analysis-stack' : 'analysis-grid'}><div className="result-metrics"><div><small>{t('DCF 基准 / 股', 'DCF base / share')}</small><strong>{money(result.dcf?.per_share_value)}</strong><span>{result.currency} · {formalModel ? t('金融小组模型', 'Finance-team model') : t('参考模型', 'Reference model')}</span></div><div><small>WACC / g</small><strong className="small-number">{percent(result.assumptions.wacc)} <em>/</em> {percent(result.assumptions.terminal_growth)}</strong><span>{result.forecast.length} {t('年预测期', 'forecast years')}</span></div></div><RangeChart result={result} t={t}/><QualityCard result={result} t={t}/><ForecastChart result={result} t={t}/><Sensitivity result={result} t={t}/><Card title={t('研究说明', 'Research notes')}><p className="report-text">{result.executive_summary}</p>{result.warnings.map((warning, index) => <p className="warning-line" key={index}><Icon name="alert" size={16}/>{warning}</p>)}<div className="source-footer"><span>{result.mode.toUpperCase()} · {result.model_version}</span><span>v{record.revision}</span></div></Card></div>
 }
 
 const financialLabels = [

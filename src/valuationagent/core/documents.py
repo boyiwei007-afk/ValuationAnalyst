@@ -52,6 +52,46 @@ def parse_document(meta: dict) -> tuple[list[dict], list[str]]:
                 warnings.append(f"第 {page_no} 页未提取到文字；扫描件 OCR 尚未接入。")
             if not add(text, {"page": page_no}):
                 break
+    elif suffix == ".docx":
+        try:
+            from docx import Document
+            from docx.table import Table
+            from docx.text.paragraph import Paragraph
+        except ImportError:
+            raise ValueError(
+                "DOCX 解析依赖未安装，请安装项目 documents 可选依赖。"
+            ) from None
+        document = Document(io.BytesIO(raw))
+        paragraph_no = table_no = 0
+        # python-docx exposes paragraphs and tables as separate lists. Iterating
+        # the XML body keeps their original order so a heading remains next to
+        # the table it explains, which is essential for reliable extraction.
+        for child in document.element.body.iterchildren():
+            if child.tag.endswith("}p"):
+                paragraph_no += 1
+                paragraph = Paragraph(child, document)
+                if paragraph.text.strip() and not add(
+                    paragraph.text,
+                    {
+                        "paragraph": paragraph_no,
+                        "style": paragraph.style.name,
+                    },
+                ):
+                    break
+            elif child.tag.endswith("}tbl"):
+                table_no += 1
+                table = Table(child, document)
+                for row_no, row in enumerate(table.rows, 1):
+                    values = [
+                        cell.text.replace("\n", " / ").strip() for cell in row.cells
+                    ]
+                    if any(values) and not add(
+                        " | ".join(values),
+                        {"table": table_no, "row": row_no},
+                    ):
+                        break
+                if total >= MAX_CHARS or len(blocks) >= MAX_BLOCKS:
+                    break
     elif suffix == ".xlsx":
         try:
             from openpyxl import load_workbook
@@ -99,5 +139,7 @@ def parse_document(meta: dict) -> tuple[list[dict], list[str]]:
                 if not add(paragraph, {"section": line}):
                     break
     else:
-        raise ValueError("此格式尚不能解析；旧版 .xls 请另存为 .xlsx，或上传 PDF/CSV/TXT。")
+        raise ValueError(
+            "此格式尚不能解析；旧版 .xls 请另存为 .xlsx，或上传 PDF/DOCX/CSV/TXT。"
+        )
     return blocks, warnings[:30]

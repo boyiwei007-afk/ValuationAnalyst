@@ -217,6 +217,125 @@ def test_cli_language_option_and_wizard_choices_reach_request(
     assert record.result.language == "en-US"
 
 
+def test_cli_autocomplete_and_password_are_prompt_toolkit_compatible(monkeypatch):
+    """Questionary forwards unsupported kwargs to PromptSession and crashes early."""
+
+    from valuationagent.cli import main as cli_main
+
+    received = []
+    monkeypatch.setattr(
+        cli_main.questionary,
+        "autocomplete",
+        lambda *args, **kwargs: received.append(("autocomplete", kwargs)) or object(),
+    )
+    monkeypatch.setattr(
+        cli_main.questionary,
+        "password",
+        lambda *args, **kwargs: received.append(("password", kwargs)) or object(),
+    )
+    monkeypatch.setattr(cli_main, "ask", lambda prompt: "constructed")
+    assert cli_main.autocomplete("Model", ["deepseek-flash"]) == "constructed"
+    assert cli_main.secret_input("API Key") == "constructed"
+    assert all("instruction" not in kwargs for _, kwargs in received)
+    assert all(kwargs["bottom_toolbar"] for _, kwargs in received)
+
+
+def test_model_picker_uses_a_clean_provider_menu_with_custom_last():
+    from valuationagent.cli.research import _model_choices
+
+    deepseek = _model_choices("deepseek")
+    assert [choice.value for choice in deepseek] == [
+        "deepseek-flash",
+        "deepseek-v4-pro",
+        "__custom__",
+    ]
+    assert deepseek[-1].title == "自定义模型…"
+    assert all("直接输入" not in choice.title for choice in deepseek)
+
+    openai = _model_choices("openai", en=True)
+    assert [choice.value for choice in openai] == ["gpt-4o-mini", "__custom__"]
+    assert openai[-1].title == "Custom model…"
+
+
+def test_agent_question_menu_keeps_model_choices_and_chat_last():
+    from valuationagent.cli.research import _agent_choices
+    from valuationagent.schemas.research import ResearchChoice, ResearchQuestion
+
+    question = ResearchQuestion(
+        question_id="question_1",
+        kind="clarification",
+        title="选择收入预测口径",
+        options=[
+            ResearchChoice(id="history", label="采用历史增速"),
+            ResearchChoice(id="industry", label="采用行业增速"),
+        ],
+    )
+    choices = _agent_choices(question)
+    assert [choice.value for choice in choices] == ["history", "industry", "__chat__"]
+    assert choices[-1].title == "Chat"
+
+    search_question = ResearchQuestion(
+        question_id="question_2",
+        kind="search_unavailable",
+        title="当前会话未配置联网搜索服务，怎样继续？",
+        options=[
+            ResearchChoice(id="upload", label="我来上传资料"),
+            ResearchChoice(id="defer", label="保留缺口"),
+        ],
+    )
+    search_choices = _agent_choices(search_question)
+    assert [choice.value for choice in search_choices] == [
+        "__search__",
+        "upload",
+        "defer",
+        "__chat__",
+    ]
+    assert search_choices[0].title == "连接 Tavily 搜索"
+
+
+def test_startup_search_setup_offers_connection_before_chat(monkeypatch):
+    from valuationagent.cli.research import configure_search_on_start
+
+    sentinel = object()
+    seen = {}
+
+    def choose(title, choices, language="zh-CN"):
+        seen["title"] = title
+        seen["values"] = [choice.value for choice in choices]
+        return "connect"
+
+    monkeypatch.setattr("valuationagent.cli.main.select", choose)
+    monkeypatch.setattr("valuationagent.cli.research.configure_search", lambda _: sentinel)
+    assert configure_search_on_start("zh-CN") is sentinel
+    assert seen == {
+        "title": "开始前配置联网搜索吗？",
+        "values": ["connect", "later"],
+    }
+
+
+def test_startup_online_services_can_be_configured_together(monkeypatch):
+    from valuationagent.cli.research import configure_data_services_on_start
+
+    search, market = object(), object()
+    seen = {}
+
+    def choose(title, choices, language="zh-CN"):
+        seen["title"] = title
+        seen["values"] = [choice.value for choice in choices]
+        return "both"
+
+    monkeypatch.setattr("valuationagent.cli.main.select", choose)
+    monkeypatch.setattr("valuationagent.cli.research.configure_search", lambda _: search)
+    monkeypatch.setattr("valuationagent.cli.research.configure_market_data", lambda _: market)
+    assert configure_data_services_on_start(
+        "zh-CN", need_search=True, need_market=True
+    ) == (search, market)
+    assert seen == {
+        "title": "配置在线数据服务",
+        "values": ["both", "market", "search", "later"],
+    }
+
+
 def test_legacy_requests_default_to_chinese():
     assert request().language == "zh-CN"
     with pytest.raises(ValidationError):
