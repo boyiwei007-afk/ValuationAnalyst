@@ -16,6 +16,7 @@ from valuationagent.core.plugins import FinancialModelPlugin
 from valuationagent.core.tools import NoArguments, ToolRegistry, ToolSpec, canonical
 from valuationagent.llm.agent import run_tool_loop
 from valuationagent.llm.client import LlmError
+from valuationagent.finance.integrity import validate_peer_inputs, verify_calculations
 from valuationagent.schemas.models import (
     ApiModel,
     AssumptionSet,
@@ -229,7 +230,15 @@ def build_workflow(services: WorkflowServices):
             else "资料快照已建立，开始核对来源与口径。",
             "data_intake",
         )
-        return {"bundle": bundle, "request": effective, "warnings": bundle.warnings}
+        method_warnings = [
+            f"{method.upper()}因可靠数据不足未进入本次计算：{reason}"
+            for method, reason in req.excluded_methods.items()
+        ]
+        return {
+            "bundle": bundle,
+            "request": effective,
+            "warnings": [*bundle.warnings, *method_warnings],
+        }
 
     def plan(s):
         if s["request"].mode != "live":
@@ -281,12 +290,14 @@ def build_workflow(services: WorkflowServices):
                     NoArguments,
                     inspect,
                 ),
-                ToolSpec(
-                    "inspect_comparables",
-                    "核对同业样本及可用倍数。",
-                    NoArguments,
-                    peers,
-                ),
+                *([
+                    ToolSpec(
+                        "inspect_comparables",
+                        "核对同业样本及可用倍数。",
+                        NoArguments,
+                        peers,
+                    )
+                ] if any(m != "dcf" for m in s["request"].methods) else []),
                 ToolSpec(
                     "request_review",
                     "只有资料存在会改变计算口径的具体歧义或阻塞性缺失时才暂停，简明说明实际发现、位置和影响。",
@@ -357,6 +368,7 @@ def build_workflow(services: WorkflowServices):
             lambda: finance.validate(req, s["bundle"].financials),
             list[ValidationFinding],
         )
+        findings += validate_peer_inputs(req, s["bundle"].peers)
         services.event(
             s["run_id"],
             type="validation.summary",
@@ -396,16 +408,15 @@ def build_workflow(services: WorkflowServices):
             lambda: finance.resolve_assumptions(req, s["bundle"].financials),
             AssumptionSet,
         )
-        services.say(
-            s["run_id"],
-            translator(req.language)(
-                "假设已固定：WACC {wacc:.2%}，永续增长率 {growth:.2%}。"
-            ).format(wacc=result.wacc, growth=result.terminal_growth),
-            "assumption_resolution",
-        )
+        services.say(s["run_id"],
+            translator(req.language)("假设已固定：WACC {wacc:.2%}，永续增长率 {growth:.2%}。").format(wacc=result.wacc, growth=result.terminal_growth)
+            if "dcf" in req.methods else "相对估值：使用已确认可比样本，不构建DCF预测或折现率假设。",
+            "assumption_resolution")
         return {"assumptions": result}
 
     def industry_parameters(s):
+        if "dcf" not in s["request"].methods:
+            return {"industry_parameters": {"mode": "not_applicable_relative_only"}}
         resolver = getattr(finance, "resolve_industry_parameters", None)
         if resolver is None:
             return {"industry_parameters": {}}
@@ -502,8 +513,14 @@ def build_workflow(services: WorkflowServices):
         }
 
     def sensitivity(s):
+        from valuationagent.finance.relative_sensitivity import relative_sensitivity
+        relative_studies = []
+        if any(m != "dcf" for m in s["request"].methods):
+            relative_studies = services.tool(s["run_id"], "sensitivity", "run_relative_sensitivity",
+                {"financials": s["bundle"].financials, "peers": s["bundle"].peers, "methods": s["request"].methods},
+                lambda: relative_sensitivity(finance, s["request"], s["bundle"].financials, s["bundle"].peers), list[SensitivityStudy])
         if s.get("dcf") is None:
-            return {"sensitivity": [], "sensitivity_studies": []}
+            return {"sensitivity": [], "sensitivity_studies": relative_studies}
         grid = services.tool(
                 s["run_id"],
                 "sensitivity",
@@ -538,7 +555,7 @@ def build_workflow(services: WorkflowServices):
                 ),
                 list[SensitivityStudy],
             )
-        return {"sensitivity": grid, "sensitivity_studies": studies}
+        return {"sensitivity": grid, "sensitivity_studies": studies + relative_studies}
 
     def reconcile(s):
         if s.get("dcf") is None and not any(
@@ -567,6 +584,9 @@ def build_workflow(services: WorkflowServices):
         record = services.store.get_run(s["run_id"])
         req = s["request"]
         dcf = s.get("dcf")
+        checks = verify_calculations(req, s["bundle"].financials, s["assumptions"], s["forecast"], dcf, s["relative"], s["bundle"].peers)
+        services.event(s["run_id"], type="calculation.verified", stage="reporting", status="completed",
+                       summary="报告前独立算术对账通过", payload={"checks": checks})
         _ = translator(req.language)
         reconciliation = s["reconciliation"].model_copy(
             update={"conclusion": _(s["reconciliation"].conclusion)}
@@ -645,6 +665,7 @@ def build_workflow(services: WorkflowServices):
             data_quality=quality,
             executive_summary=summary,
             warnings=s["warnings"],
+            calculation_checks=checks,
         )
         services.say(s["run_id"], summary, "reporting")
         services.event(

@@ -152,5 +152,5 @@ def test_research_report_preserves_summary_pending_review_and_escaped_text(tmp_p
         assert "保留 &amp; 原文依据" in response.text
         assert '<script>' not in response.text
         assert 'name="viewport"' in response.text
-        assert 'class="table-scroll"' in response.text
-        assert client.get(f"/api/research-sessions/{session.session_id}/export?format=pdf").status_code == 422
+        assert '方法适用性与最小输入' in response.text
+        assert client.get(f"/api/research-sessions/{session.session_id}/export?format=pdf").status_code == 200

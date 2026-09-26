@@ -12,6 +12,7 @@ from valuationagent.finance.industry import (
     IndustryResolutionError,
 )
 from valuationagent.finance.reference import ReferenceFinancialModel
+from valuationagent.finance.integrity import validate_equity_bridge_inputs
 from valuationagent.finance.revenue import FinanceTeamRevenueModel
 from valuationagent.schemas.models import (
     AssumptionSet,
@@ -71,7 +72,7 @@ class FinanceTeamModel:
     """Deterministic implementation of the supplied non-financial A-share model."""
 
     plugin_id = "finance_team_nonfinancial_fcff_relative"
-    version = "1.2.0-finance-team-20260924"
+    version = "1.3.0-finance-team-20260925"
     supports_incremental_inputs = True
 
     def __init__(self, registry: IndustryParameterRegistry | None = None):
@@ -122,6 +123,9 @@ class FinanceTeamModel:
     def validate(
         self, request: ValuationRequest, financials: FinancialSnapshot
     ) -> list[ValidationFinding]:
+        bridge_findings = validate_equity_bridge_inputs(request, financials)
+        if bridge_findings:
+            return [*self.reference.validate(request, financials), *bridge_findings]
         if self._use_reference_compatibility(request):
             findings = self.reference.validate(request, financials)
             if request.mode != "demo":
@@ -138,6 +142,8 @@ class FinanceTeamModel:
                 )
             return findings
         findings = self.reference.validate(request, financials)
+        if "dcf" not in request.methods or any(f.severity == "blocking" for f in findings):
+            return findings
         try:
             industry = self.registry.resolve(request.company.industry)
         except FinancialIndustryUnsupported as exc:
@@ -159,6 +165,16 @@ class FinanceTeamModel:
             )
             return findings
         raw_history = [*request.historical_financials, financials]
+        from valuationagent.schemas.models import required_financial_metrics
+        for row in raw_history:
+            if row.comparability_status == "excluded":
+                continue
+            missing = sorted(key for key in required_financial_metrics(["dcf"]) if getattr(row, key) is None)
+            if missing:
+                findings.append(ValidationFinding(rule_id="HISTORY_METHOD_INPUTS_MISSING", severity="blocking",
+                    message=f"{row.period_end} 历史DCF输入不完整：" + "、".join(missing)))
+        if any(f.severity == "blocking" for f in findings):
+            return findings
         active_history = [
             row for row in raw_history
             if row.period_end <= request.valuation_date
@@ -272,7 +288,13 @@ class FinanceTeamModel:
                 )
             )
         history = self._history(request, financials)
-        manual_growth = request.assumptions.revenue_growth
+        manual_growth = (
+            request.assumptions.revenue_growth
+            or (
+                request.assumptions.revenue_growth_scenarios.get("base")
+                if request.assumptions.revenue_growth_scenarios else None
+            )
+        )
         if not manual_growth:
             if len(history) < 4:
                 findings.append(
@@ -330,6 +352,14 @@ class FinanceTeamModel:
                         + "、".join(industry.required_metadata_missing)
                         + "。本次结果保留参数版本与原始文件哈希，但参数置信区间仍待金融小组补充。"
                     ),
+                )
+            )
+        if industry.provenance_note:
+            findings.append(
+                ValidationFinding(
+                    rule_id="INDUSTRY_PARAMETER_FALLBACK",
+                    severity="warning",
+                    message=industry.provenance_note,
                 )
             )
         special_routes = {
@@ -581,7 +611,7 @@ class FinanceTeamModel:
     def resolve_assumptions(
         self, request: ValuationRequest, financials: FinancialSnapshot
     ) -> AssumptionSet:
-        if self._use_reference_compatibility(request):
+        if "dcf" not in request.methods or self._use_reference_compatibility(request):
             return self.reference.resolve_assumptions(request, financials)
         industry = self.registry.resolve(request.company.industry)
         history = self._history(request, financials)
@@ -591,7 +621,13 @@ class FinanceTeamModel:
             "金融行业被排除，参数库不会为金融公司返回通用FCFF参数。",
         ]
         revenue_drivers: dict[str, Decimal] = {}
-        if request.assumptions.revenue_growth:
+        if request.assumptions.revenue_growth_scenarios:
+            revenue_scenarios = {
+                name: _fit(path, request.forecast_years)
+                for name, path in request.assumptions.revenue_growth_scenarios.items()
+            }
+            growth_rationale = "用户分别指定悲观、基准和乐观收入增长路径"
+        elif request.assumptions.revenue_growth:
             revenue_scenarios = {
                 "base": _fit(request.assumptions.revenue_growth, request.forecast_years)
             }
@@ -617,7 +653,13 @@ class FinanceTeamModel:
                 f"十年历史模型：CAGR={projection.cagr:.4%}，A3={projection.a3:.4%}，"
                 f"A5={projection.a5:.4%}，位置={projection.position}"
             )
-        if request.assumptions.ebit_margin:
+        if request.assumptions.ebit_margin_scenarios:
+            margin_scenarios = {
+                name: _fit(path, request.forecast_years)
+                for name, path in request.assumptions.ebit_margin_scenarios.items()
+            }
+            margin_rationale = "用户分别指定悲观、基准和乐观EBIT利润率路径"
+        elif request.assumptions.ebit_margin:
             base_margin = _fit(request.assumptions.ebit_margin, request.forecast_years)
             margin_scenarios = {name: list(base_margin) for name in revenue_scenarios}
             margin_rationale = "用户指定EBIT利润率路径"
@@ -2145,17 +2187,26 @@ class FinanceTeamModel:
         core_evidence = {
             "revenue",
             "ebit_margin",
-            "net_income_parent",
+            "tax_rate",
             "depreciation_amortization",
             "capital_expenditure",
+            "change_operating_nwc",
+            "cash_and_non_operating_assets",
+            "interest_bearing_debt",
+            "common_shares",
+            "net_income_parent",
+            "ebitda",
         }
+        from valuationagent.schemas.models import required_financial_metrics
+        core_evidence = required_financial_metrics(request.methods)
+        has_dcf = "dcf" in request.methods
         denominator = max(len(history) * len(core_evidence), 1)
         evidence_count = sum(
             len(core_evidence & set(row.evidence)) for row in history
         )
         evidence_coverage = D(evidence_count) / D(denominator)
         notes: list[str] = []
-        if len(history) < 10:
+        if has_dcf and len(history) < 10:
             notes.append(f"仅有{len(history)}个可用历史年度，长期统计量样本有限。")
         if adjusted_years:
             notes.append("调整后年度已进入模型，需结合comparability_note复核。")
@@ -2166,16 +2217,21 @@ class FinanceTeamModel:
 
         industry_quality = "unknown"
         metadata_completeness = "unknown"
-        if not self._use_reference_compatibility(request):
+        if has_dcf and not self._use_reference_compatibility(request):
             industry = self.registry.resolve(request.company.industry)
             industry_quality = industry.quality
             metadata_completeness = industry.metadata_completeness
             if metadata_completeness != "complete":
                 notes.append("行业参数保留版本与文件哈希，但样本期、样本量和置信区间尚未补全。")
+            if industry.provenance_note:
+                notes.append(industry.provenance_note)
 
         requested_relative = any(method != ValuationMethod.DCF for method in request.methods)
         if requested_relative and peers:
             notes.append(f"相对估值候选池共{len(peers)}家公司，质量结论按各倍数有效样本计算。")
+        peer_provenance_missing = requested_relative and any(not p.evidence or p.as_of_date is None or p.multiple_basis == "unknown" for p in peers)
+        if peer_provenance_missing:
+            notes.append("部分可比公司缺少定价日、分母口径或原文证据，须人工核验，不能视为已核验同业。")
         successful_quality = [
             item.sample_quality for item in relative if item.status == "success"
         ]
@@ -2191,16 +2247,17 @@ class FinanceTeamModel:
             peer_quality = "adequate"
 
         low = (
-            len(history) < 6
+            (has_dcf and len(history) < 6)
             or evidence_coverage < D("0.4")
             or industry_quality == "C"
             or peer_quality == "insufficient"
+            or peer_provenance_missing
         )
         medium = (
-            len(history) < 10
+            (has_dcf and len(history) < 10)
             or evidence_coverage < D("0.8")
             or industry_quality == "B"
-            or metadata_completeness != "complete"
+            or (has_dcf and metadata_completeness != "complete")
             or peer_quality == "limited"
             or bool(adjusted_years or excluded_years)
         )

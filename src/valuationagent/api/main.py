@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
 from pathlib import Path
 from typing import Annotated
@@ -92,6 +93,14 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
     )
 
     app.state.store = store
+    @app.middleware("http")
+    async def cache_policy(request: Request, call_next):
+        response = await call_next(request)
+        # Reload after deployment must never refer to removed hashed assets;
+        # task data and credentials must not enter shared HTTP caches.
+        if request.url.path.startswith("/api/") or "text/html" in response.headers.get("content-type", ""):
+            response.headers["Cache-Control"] = "no-store"
+        return response
     app.state.runner = runner
     app.state.sessions = sessions
     app.state.research = ResearchService(
@@ -233,6 +242,15 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
                 capability_id="pdf_excel_reporting",
                 available=True,
                 detail="正式估值结果支持JSON、Excel审计工作簿与PDF报告",
+            ),
+            Capability(
+                capability_id="research_document_ingestion",
+                available=all(importlib.util.find_spec(name) is not None for name in ("pypdf", "openpyxl", "docx")),
+                detail="研究工作台支持文本PDF、DOCX、XLSX、CSV/TSV、HTML、JSON、TXT、MD；字段语义提取需模型，扫描件OCR未接入",
+            ),
+            Capability(
+                capability_id="research_outcome_reports", available=True,
+                detail="即使没有有效数值估值也生成HTML/JSON说明报告；PDF需reports依赖。读取失败、搜索上限和待核验字段均如实披露",
             ),
         ]
 
@@ -382,7 +400,7 @@ def create_app(data_dir: Path | str | None = None) -> FastAPI:
     def export_run(run_id: str, format: str = "json"):
         record = get_run_or_404(run_id)
         try:
-            content, media_type, extension = reports.export(record, format)
+            content, media_type, extension = reports.export(record, format, store=store)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         return Response(

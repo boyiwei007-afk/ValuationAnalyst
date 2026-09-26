@@ -17,6 +17,7 @@ from valuationagent.schemas.models import ApiModel, Language
 
 IntentKind = Literal[
     "new_valuation",
+    "run_valuation",
     "provide_material",
     "ask_explanation",
     "revise_assumption",

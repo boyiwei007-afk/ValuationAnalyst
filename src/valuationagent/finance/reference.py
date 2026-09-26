@@ -43,7 +43,7 @@ class ReferenceFinancialModel:
     """Transparent integration model. A finance reviewer should replace or approve it."""
 
     plugin_id = "reference_fcff_relative"
-    version = "0.2.0-reference"
+    version = "0.3.0-reference"
     supports_incremental_inputs = True
 
     @staticmethod
@@ -62,7 +62,12 @@ class ReferenceFinancialModel:
     def validate(
         self, request: ValuationRequest, financials: FinancialSnapshot
     ) -> list[ValidationFinding]:
+        from valuationagent.schemas.models import required_financial_metrics
         findings: list[ValidationFinding] = []
+        missing = sorted(key for key in required_financial_metrics(request.methods) if getattr(financials, key) is None)
+        if missing:
+            return [ValidationFinding(rule_id="METHOD_INPUTS_MISSING", severity="blocking",
+                                      message="所选估值方法缺少已确认字段：" + "、".join(missing))]
         if financials.published_at and financials.published_at > request.valuation_date:
             findings.append(
                 ValidationFinding(
@@ -122,7 +127,7 @@ class ReferenceFinancialModel:
                     recommended_action="更换估值日或使用当时已公开的数据。",
                 )
             )
-        if financials.ebitda <= 0:
+        if "ev_ebitda" in request.methods and financials.ebitda <= 0:
             findings.append(
                 ValidationFinding(
                     rule_id="MULTIPLE_APPLICABILITY_001",
@@ -130,7 +135,7 @@ class ReferenceFinancialModel:
                     message="EBITDA 非正，EV/EBITDA 相对估值将不适用。",
                 )
             )
-        if financials.net_income_parent <= 0:
+        if "pe" in request.methods and financials.net_income_parent <= 0:
             findings.append(
                 ValidationFinding(
                     rule_id="MULTIPLE_APPLICABILITY_002",
@@ -138,6 +143,8 @@ class ReferenceFinancialModel:
                     message="归母净利润非正，P/E 相对估值将不适用。",
                 )
             )
+        if "dcf" not in request.methods:
+            return findings
         reinvestment = (
             financials.capital_expenditure
             - financials.depreciation_amortization
@@ -165,6 +172,10 @@ class ReferenceFinancialModel:
     def resolve_assumptions(
         self, request: ValuationRequest, financials: FinancialSnapshot
     ) -> AssumptionSet:
+        if "dcf" not in request.methods:
+            return AssumptionSet(revenue_growth=[], ebit_margin=[], wacc=D(0), terminal_growth=D(0),
+                                 source="not_applicable_relative_only",
+                                 rationale={"scope": "仅进行相对估值，不构建现金流预测；WACC和永续增长率不适用。"})
         years = request.forecast_years
         provided_growth = request.assumptions.revenue_growth
         if provided_growth:
@@ -251,6 +262,9 @@ class ReferenceFinancialModel:
             discount_period = (
                 D((remaining_start - request.valuation_date).days) + D(remaining) / 2
             ) / D("365.25")
+            if request.discount_policy == "year_end":
+                fraction = D(1)
+                discount_period = D(index + 1)
             growth = assumptions.revenue_growth[index]
             margin = assumptions.ebit_margin[index]
             revenue = revenue * (D(1) + growth)
@@ -284,6 +298,7 @@ class ReferenceFinancialModel:
         forecast: list[ForecastYear],
         wacc: Decimal,
         terminal_growth: Decimal,
+        discount_policy: str = "annual_midyear_remaining",
     ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
         if wacc <= 0 or terminal_growth >= wacc:
             raise ValueError("terminal growth must be lower than WACC")
@@ -299,6 +314,8 @@ class ReferenceFinancialModel:
         terminal_period = (
             forecast[-1].discount_period + forecast[-1].cash_flow_fraction / 2
         )
+        if discount_policy == "year_end":
+            terminal_period = forecast[-1].discount_period
         discounted_terminal = terminal_value / ((D(1) + wacc) ** terminal_period)
         enterprise_value = present_value + discounted_terminal
         equity_value = (
@@ -320,7 +337,7 @@ class ReferenceFinancialModel:
         forecast: list[ForecastYear],
     ) -> DcfResult:
         enterprise, equity, per_share, terminal_share = self._dcf_from_forecast(
-            financials, forecast, assumptions.wacc, assumptions.terminal_growth
+            financials, forecast, assumptions.wacc, assumptions.terminal_growth, request.discount_policy
         )
         pessimistic = assumptions.model_copy(
             update={
@@ -360,7 +377,7 @@ class ReferenceFinancialModel:
             rows = self.forecast(request, financials, scenario)
             values.append(
                 self._dcf_from_forecast(
-                    financials, rows, scenario.wacc, scenario.terminal_growth
+                    financials, rows, scenario.wacc, scenario.terminal_growth, request.discount_policy
                 )[2]
             )
         return DcfResult(
@@ -472,7 +489,7 @@ class ReferenceFinancialModel:
                     )
                     continue
                 _, _, value, _ = self._dcf_from_forecast(
-                    financials, forecast, wacc, growth
+                    financials, forecast, wacc, growth, request.discount_policy
                 )
                 cells.append(
                     SensitivityCell(

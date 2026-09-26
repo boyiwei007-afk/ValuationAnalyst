@@ -1,9 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildRequest, percentToDecimal, decimalToPercent, mergeEvents, stageStates, sensitivityGrid, valuationRanges } from '../src/domain.js'
+import { STAGES, buildRequest, percentToDecimal, decimalToPercent, mergeEvents, stageStates, sensitivityGrid, valuationRanges } from '../src/domain.js'
 
 const draft = overrides => ({ language: 'en-US', mode: 'snapshot', company: 'Example Company', date: '2026-09-12', source: 'structured', ticker: '', assumptionSource: 'manual', wacc: '8.0000000000001', growth: '2.5', revenueGrowth: '', years: '5', methods: ['dcf', 'pe'], fileIds: [], assumptionFileIds: [], ...overrides })
 const base = { company: { name: 'Original', currency: 'CNY' }, financials: { revenue: '10000000000.123456789' }, assumptions: { revenue_growth: ['0.08','0.07','0.06','0.05','0.04'], ebit_margin: ['0.16'] }, peers: [{ name: 'Peer' }] }
+
+test('workflow stage catalogue exposes all eleven backend stages', () => {
+  assert.equal(STAGES.length, 11)
+})
 
 test('task choices preserve decimal values and imported annual assumptions', () => {
   const request = buildRequest(draft(), base)

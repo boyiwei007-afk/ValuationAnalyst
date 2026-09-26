@@ -11,9 +11,12 @@ from valuationagent.finance.industry import (
 from valuationagent.finance.revenue import FinanceTeamRevenueModel
 from valuationagent.finance.team_model import FinanceTeamModel
 from valuationagent.schemas.models import (
+    AssumptionInputs,
     CompanyInput,
+    EvidenceRef,
     FinancialSnapshot,
     PeerCompany,
+    RevisionInput,
     ValuationRequest,
 )
 from valuationagent.storage.sqlite import SQLiteRunStore
@@ -72,6 +75,43 @@ def test_registry_is_versioned_and_financial_industry_is_out_of_scope():
     assert len(registry.source_sha256) == 64
     with pytest.raises(FinancialIndustryUnsupported):
         registry.resolve("银行")
+
+    liquor = registry.resolve("食品饮料 / 白酒")
+    assert liquor.industry_id == "consumer_staples_fallback"
+    assert liquor.quality == "C"
+    assert liquor.metadata_completeness == "fallback"
+    assert "缺少食品饮料/白酒专属行" in liquor.provenance_note
+
+
+def test_consumer_staples_fallback_is_explicitly_warned():
+    model = FinanceTeamModel()
+    req = request("食品饮料 / 白酒")
+
+    findings = model.validate(req, req.financials)
+
+    assert any(item.rule_id == "INDUSTRY_PARAMETER_FALLBACK" for item in findings)
+
+
+def test_evidence_coverage_counts_fields_required_by_selected_methods():
+    rows = [
+        row.model_copy(update={
+            "evidence": {
+                "revenue": [EvidenceRef(
+                    evidence_id=f"revenue-{row.period_end.year}",
+                    source="audited annual report",
+                )]
+            }
+        })
+        for row in history()
+    ]
+    req = request()
+    req.historical_financials = rows[:-1]
+    req.financials = rows[-1]
+
+    quality = FinanceTeamModel().assess_quality(req, req.financials, [], [])
+
+    # DCF requires nine fields; unused NI and EBITDA must not dilute coverage.
+    assert quality.evidence_coverage == D("0.1111")
 
 
 def test_revenue_model_uses_ten_years_and_terminal_constraint():
@@ -174,12 +214,79 @@ def test_manual_forecast_discloses_short_history_and_single_point_range():
     assert any("区间已退化为单点" in item for item in dcf.scenario_warnings)
 
 
+def test_manual_three_scenario_paths_produce_a_real_valuation_range():
+    model = FinanceTeamModel()
+    req = request()
+    req.historical_financials = []
+    req.assumption_source = "manual"
+    req.assumptions = AssumptionInputs(
+        revenue_growth_scenarios={
+            "pessimistic": [D("0.03")] * 10,
+            "base": [D("0.06")] * 9 + [D("0.03")],
+            "optimistic": [D("0.09")] * 9 + [D("0.03")],
+        },
+        ebit_margin_scenarios={
+            "pessimistic": [D("0.18")] * 10,
+            "base": [D("0.22")] * 10,
+            "optimistic": [D("0.26")] * 10,
+        },
+        wacc=D("0.09"),
+        terminal_growth=D("0.03"),
+    )
+
+    findings = model.validate(req, req.financials)
+    assert not any(item.rule_id == "REVENUE_HISTORY_MINIMUM" for item in findings)
+    assumptions = model.resolve_assumptions(req, req.financials)
+    dcf = model.dcf(
+        req, req.financials, assumptions,
+        model.forecast(req, req.financials, assumptions),
+    )
+
+    assert assumptions.revenue_growth == assumptions.revenue_growth_scenarios["base"]
+    assert assumptions.ebit_margin == assumptions.ebit_margin_scenarios["base"]
+    assert dcf.range_low < dcf.per_share_value < dcf.range_high
+    assert not any("区间已退化为单点" in item for item in dcf.scenario_warnings)
+
+
+def test_manual_scenario_inputs_require_all_three_named_paths():
+    with pytest.raises(ValueError, match="pessimistic, base and optimistic"):
+        AssumptionInputs(revenue_growth_scenarios={"base": [D("0.05")]})
+
+
+def test_wacc_only_revision_preserves_manual_scenario_paths(tmp_path):
+    req = request()
+    req.assumption_source = "manual"
+    req.assumptions = AssumptionInputs(
+        revenue_growth_scenarios={
+            "pessimistic": [D("0.03")] * 10,
+            "base": [D("0.06")] * 9 + [D("0.03")],
+            "optimistic": [D("0.09")] * 9 + [D("0.03")],
+        },
+        ebit_margin_scenarios={
+            "pessimistic": [D("0.18")] * 10,
+            "base": [D("0.22")] * 10,
+            "optimistic": [D("0.26")] * 10,
+        },
+        wacc=D("0.095"), terminal_growth=D("0.03"),
+    )
+    runner = ValuationRunner(SQLiteRunStore(tmp_path / "scenario-revision"), FinanceTeamModel())
+    parent = runner.run(req)
+
+    child = runner.revise(
+        parent.run_id,
+        RevisionInput(changes={"assumptions": {"wacc": "0.09"}}, reason="WACC复核"),
+    )
+
+    assert child.request.assumptions.revenue_growth_scenarios == req.assumptions.revenue_growth_scenarios
+    assert child.request.assumptions.ebit_margin_scenarios == req.assumptions.ebit_margin_scenarios
+
+
 def test_formal_model_runs_through_audited_agent_workflow(tmp_path):
     store = SQLiteRunStore(tmp_path / "formal-model")
     record = ValuationRunner(store, FinanceTeamModel()).run(request())
 
     assert record.result is not None
-    assert record.result.model_version == "1.2.0-finance-team-20260924"
+    assert record.result.model_version == "1.3.0-finance-team-20260925"
     assert record.result.data_quality.confidence in {"low", "medium", "high"}
     assert record.result.assumptions.industry_parameters["industry_id"] == "electronics"
     assert len(record.result.forecast) == 10

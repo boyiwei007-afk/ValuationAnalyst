@@ -95,22 +95,26 @@ class EvidenceRef(ApiModel):
     sheet: str | None = None
     cell: str | None = None
     published_at: date | None = None
+    source_url: str = ""
+    source_sha256: str = ""
     note: str = ""
 
 
 class FinancialSnapshot(ApiModel):
     period_end: date
-    revenue: JsonDecimal = Field(gt=0)
-    ebit_margin: JsonDecimal = Field(ge=Decimal("-1"), le=Decimal("1"))
-    tax_rate: JsonDecimal = Field(ge=0, le=Decimal("0.6"))
-    depreciation_amortization: JsonDecimal = Field(ge=0)
-    capital_expenditure: JsonDecimal = Field(ge=0)
-    change_operating_nwc: JsonDecimal
-    cash_and_non_operating_assets: JsonDecimal = Field(ge=0)
-    interest_bearing_debt: JsonDecimal = Field(ge=0)
+    # Missing means unknown, never zero. Required fields depend on the selected
+    # method and are checked before any financial calculations.
+    revenue: JsonDecimal | None = Field(default=None, gt=0)
+    ebit_margin: JsonDecimal | None = Field(default=None, ge=Decimal("-1"), le=Decimal("1"))
+    tax_rate: JsonDecimal | None = Field(default=None, ge=0, le=Decimal("0.6"))
+    depreciation_amortization: JsonDecimal | None = Field(default=None, ge=0)
+    capital_expenditure: JsonDecimal | None = Field(default=None, ge=0)
+    change_operating_nwc: JsonDecimal | None = None
+    cash_and_non_operating_assets: JsonDecimal | None = Field(default=None, ge=0)
+    interest_bearing_debt: JsonDecimal | None = Field(default=None, ge=0)
     common_shares: JsonDecimal = Field(gt=0)
-    net_income_parent: JsonDecimal
-    ebitda: JsonDecimal
+    net_income_parent: JsonDecimal | None = None
+    ebitda: JsonDecimal | None = None
     source_label: str = "user_structured_input"
     currency: str = "CNY"
     unit: Literal["base_currency"] = "base_currency"
@@ -124,6 +128,10 @@ class FinancialSnapshot(ApiModel):
     comparability_note: str = Field(default="", max_length=1000)
     evidence: dict[str, list[EvidenceRef]] = Field(default_factory=dict)
     statement_items: dict[str, JsonDecimal] = Field(default_factory=dict)
+    # Machine-readable formulas used to turn confirmed statement lines into
+    # valuation inputs.  Keeping this beside the snapshot makes derived values
+    # independently reviewable and reproducible in exports and audit logs.
+    calculation_methods: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def comparability_change_requires_note(self) -> "FinancialSnapshot":
@@ -144,11 +152,33 @@ class PeerCompany(ApiModel):
     selection_score: JsonDecimal | None = Field(default=None, ge=0)
     peer_tier: Literal["core", "broad", "user"] = "user"
     rationale: str = "user-provided comparable"
+    as_of_date: date | None = None
+    multiple_basis: Literal["FY", "TTM", "forward", "unknown"] = "unknown"
+    evidence: dict[str, list[EvidenceRef]] = Field(default_factory=dict)
+
+
+def required_financial_metrics(methods):
+    required = {"common_shares"}
+    by_method = {
+        "dcf": {"revenue", "ebit_margin", "tax_rate", "depreciation_amortization",
+                "capital_expenditure", "change_operating_nwc", "cash_and_non_operating_assets", "interest_bearing_debt"},
+        "pe": {"net_income_parent"}, "ps": {"revenue"},
+        "ev_ebitda": {"ebitda", "cash_and_non_operating_assets", "interest_bearing_debt"},
+    }
+    for method in methods:
+        required.update(by_method.get(str(method), set()))
+    return required
 
 
 class AssumptionInputs(ApiModel):
     revenue_growth: list[JsonDecimal] | None = None
     ebit_margin: list[JsonDecimal] | None = None
+    revenue_growth_scenarios: dict[
+        Literal["pessimistic", "base", "optimistic"], list[JsonDecimal]
+    ] | None = None
+    ebit_margin_scenarios: dict[
+        Literal["pessimistic", "base", "optimistic"], list[JsonDecimal]
+    ] | None = None
     wacc: JsonDecimal | None = Field(default=None, gt=0, lt=Decimal("0.5"))
     terminal_growth: JsonDecimal | None = Field(
         default=None, ge=Decimal("-0.1"), lt=Decimal("0.2")
@@ -188,6 +218,26 @@ class AssumptionInputs(ApiModel):
             raise ValueError("series must contain at least one value")
         return value
 
+    @model_validator(mode="after")
+    def require_complete_scenario_sets(self) -> "AssumptionInputs":
+        required = {"pessimistic", "base", "optimistic"}
+        for field_name in (
+            "revenue_growth_scenarios",
+            "ebit_margin_scenarios",
+        ):
+            scenarios = getattr(self, field_name)
+            if not scenarios:
+                continue
+            if set(scenarios) != required:
+                missing = ", ".join(sorted(required - set(scenarios))) or "none"
+                raise ValueError(
+                    f"{field_name} must contain pessimistic, base and optimistic; "
+                    f"missing: {missing}"
+                )
+            if any(not path for path in scenarios.values()):
+                raise ValueError(f"{field_name} scenario paths must not be empty")
+        return self
+
 
 class ValuationRequest(ApiModel):
     company: CompanyInput
@@ -204,6 +254,8 @@ class ValuationRequest(ApiModel):
             ValuationMethod.EV_EBITDA,
         ]
     )
+    requested_methods: list[ValuationMethod] = Field(default_factory=list)
+    excluded_methods: dict[str, str] = Field(default_factory=dict)
     financials: FinancialSnapshot | None = None
     historical_financials: list[FinancialSnapshot] = Field(default_factory=list)
     assumptions: AssumptionInputs = Field(default_factory=AssumptionInputs)
@@ -233,6 +285,8 @@ class ValuationRequest(ApiModel):
                 "assumption_source",
                 "forecast_years",
                 "methods",
+                "requested_methods",
+                "excluded_methods",
                 "discount_policy",
                 "assumptions",
                 "file_ids",
@@ -251,6 +305,17 @@ class ValuationRequest(ApiModel):
 
     @model_validator(mode="after")
     def source_inputs_are_present(self) -> "ValuationRequest":
+        if not self.requested_methods:
+            self.requested_methods = list(self.methods)
+        if not set(self.methods) <= set(self.requested_methods):
+            raise ValueError("effective valuation methods must be a subset of requested_methods")
+        unknown_exclusions = set(self.excluded_methods) - {
+            str(method) for method in self.requested_methods
+        }
+        if unknown_exclusions:
+            raise ValueError("excluded_methods contains methods that were not requested")
+        if set(self.excluded_methods) & {str(method) for method in self.methods}:
+            raise ValueError("an effective valuation method cannot also be excluded")
         if self.data_source == DataSourceType.TICKER and not self.company.ticker:
             raise ValueError("ticker data source requires company.ticker")
         if self.data_source == DataSourceType.UPLOAD and not self.file_ids:
@@ -436,6 +501,7 @@ class ValuationOutput(ApiModel):
     data_quality: DataQualityAssessment = Field(default_factory=DataQualityAssessment)
     executive_summary: str
     warnings: list[str] = Field(default_factory=list)
+    calculation_checks: list[str] = Field(default_factory=list)
 
 
 class ValidationFinding(ApiModel):

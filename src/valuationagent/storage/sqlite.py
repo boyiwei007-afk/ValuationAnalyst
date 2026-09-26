@@ -6,6 +6,8 @@ import sqlite3
 import threading
 import uuid
 import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,16 +44,34 @@ class SQLiteRunStore:
         self._lock = threading.RLock()
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open one transaction-scoped connection and always release its handle."""
         connection = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.executescript(
                 """
                 PRAGMA journal_mode=WAL;
+                CREATE TABLE IF NOT EXISTS research_jobs (
+                    session_id TEXT NOT NULL, request_id TEXT NOT NULL, body_hash TEXT NOT NULL,
+                    body_json TEXT NOT NULL, status TEXT NOT NULL, stage TEXT NOT NULL,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created REAL NOT NULL, updated REAL NOT NULL,
+                    PRIMARY KEY(session_id, request_id)
+                );
+                CREATE INDEX IF NOT EXISTS research_jobs_recent ON research_jobs(session_id,created DESC);
+                CREATE TABLE IF NOT EXISTS event_summaries (
+                    run_id TEXT NOT NULL, sequence INTEGER NOT NULL, summary_json TEXT NOT NULL,
+                    PRIMARY KEY(run_id,sequence)
+                );
                 CREATE TABLE IF NOT EXISTS research_sessions (
                     session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
                     session_json TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -59,6 +79,12 @@ class SQLiteRunStore:
                 CREATE TABLE IF NOT EXISTS research_documents (
                     session_id TEXT NOT NULL, file_id TEXT NOT NULL,
                     blocks_json TEXT NOT NULL, PRIMARY KEY(session_id, file_id)
+                );
+                CREATE TABLE IF NOT EXISTS research_reports (
+                    session_id TEXT NOT NULL, source_revision INTEGER NOT NULL,
+                    report_id TEXT NOT NULL, report_json TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    PRIMARY KEY(session_id, report_id)
                 );
                 CREATE TABLE IF NOT EXISTS lineage (
                     run_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, parent_id TEXT,
@@ -226,6 +252,9 @@ class SQLiteRunStore:
                 "INSERT INTO events(run_id,sequence,event_json) VALUES(?,?,?)",
                 (run_id, sequence, event.model_dump_json()),
             )
+            summary = event.model_dump(mode="json")
+            summary["has_detail"] = bool(summary.pop("payload", None))
+            connection.execute("INSERT INTO event_summaries VALUES(?,?,?)", (run_id, sequence, _json(summary)))
         return event
 
     def list_events(self, run_id: str, after: int = 0) -> list[RunEvent]:
@@ -267,10 +296,67 @@ class SQLiteRunStore:
     def list_messages(self, run_id: str) -> list[ChatMessage]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT message_json FROM messages WHERE run_id=? ORDER BY created_at,message_id",
+                "SELECT message_json FROM messages WHERE run_id=? ORDER BY rowid",
                 (run_id,),
             ).fetchall()
         return [ChatMessage.model_validate_json(row["message_json"]) for row in rows]
+
+    def event_page(self, run_id, after=None, limit=100):
+        limit = max(1, min(limit, 200))
+        with self._connect() as db:
+            latest = db.execute("SELECT COALESCE(MAX(sequence),0) FROM events WHERE run_id=?", (run_id,)).fetchone()[0]
+            cursor = max(0, latest - limit) if after is None else max(0, after)
+            rows = db.execute("""SELECT COALESCE(s.summary_json,json_remove(e.event_json,'$.payload')) AS summary
+                FROM events e LEFT JOIN event_summaries s ON e.run_id=s.run_id AND e.sequence=s.sequence
+                WHERE e.run_id=? AND e.sequence>? ORDER BY e.sequence LIMIT ?""", (run_id, cursor, limit)).fetchall()
+        items = [json.loads(row[0]) for row in rows]
+        end = items[-1]["sequence"] if items else cursor
+        return {"events": items, "cursor": end, "has_more": end < latest, "total": latest}
+
+    def event_detail(self, run_id, sequence):
+        with self._connect() as db:
+            row = db.execute("SELECT event_json FROM events WHERE run_id=? AND sequence=?", (run_id, sequence)).fetchone()
+        if row is None:
+            raise KeyError(sequence)
+        return json.loads(row[0])
+
+    def message_page(self, run_id, before=None, limit=60):
+        limit = max(1, min(100, limit))
+        with self._connect() as db:
+            rows = db.execute("""SELECT rowid,message_json FROM messages WHERE run_id=? AND rowid<?
+                ORDER BY rowid DESC LIMIT ?""", (run_id, before or 9223372036854775807, min(100, max(1, limit)) + 1)).fetchall()
+        more = len(rows) > limit
+        rows = rows[:limit]
+        return {"messages": [json.loads(row[1]) for row in reversed(rows)],
+                "before": rows[-1][0] if rows else None, "has_more": more}
+
+    def reserve_research_job(self, session_id, request_id, body):
+        encoded = _json(body)
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        now = time.time()
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM research_jobs WHERE session_id=? AND request_id=?", (session_id, request_id)).fetchone()
+            if row:
+                if row["body_hash"] != digest:
+                    raise ValueError("同一请求标识不能提交不同内容，请创建新请求。")
+                return False
+            if db.execute("SELECT 1 FROM research_jobs WHERE session_id=? AND status IN ('queued','running')", (session_id,)).fetchone():
+                raise ValueError("当前研究正在执行，请等待完成或停止后继续。")
+            db.execute("INSERT INTO research_jobs VALUES(?,?,?,?,?,?,?,?,?)", (session_id, request_id, digest, encoded, "queued", "queued", 0, now, now))
+        return True
+
+    def research_job(self, session_id, request_id=None):
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM research_jobs WHERE session_id=?" + (" AND request_id=?" if request_id else " ORDER BY created DESC LIMIT 1"),
+                             (session_id, request_id) if request_id else (session_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_research_job(self, session_id, request_id, *, status=None, stage=None, cancel=False):
+        with self._connect() as db:
+            db.execute("""UPDATE research_jobs SET status=COALESCE(?,status), stage=COALESCE(?,stage),
+                cancel_requested=MAX(cancel_requested,?), updated=? WHERE session_id=? AND request_id=?""",
+                       (status, stage, int(cancel), time.time(), session_id, request_id))
 
     def save_upload(
         self, name: str, role: str, content_type: str | None, content: bytes
@@ -292,14 +378,16 @@ class SQLiteRunStore:
             ".pdf",
             ".docx",
             ".xlsx",
-            ".xls",
             ".csv",
+            ".tsv",
             ".json",
             ".txt",
             ".md",
+            ".html",
+            ".htm",
         }:
             raise ValueError(
-                "supported file types: PDF, DOCX, Excel, CSV, JSON, TXT, Markdown"
+                "supported file types: PDF, DOCX, Excel, CSV/TSV, HTML, JSON, TXT, Markdown"
             )
         target = (self.upload_dir / f"{file_id}{safe_suffix}").resolve()
         if self.upload_dir not in target.parents:
@@ -450,9 +538,35 @@ class SQLiteRunStore:
             rows = db.execute("SELECT session_id FROM research_sessions ORDER BY updated_at DESC LIMIT ?", (max(1, min(limit, 100)),)).fetchall()
         return [self.get_research(row[0]) for row in rows]
 
+    def save_research_report(self, session_id, document, summary):
+        with self._lock, self._connect() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO research_reports VALUES(?,?,?,?,?)",
+                (session_id, document["source_revision"], document["report_id"],
+                 _json(document), _json(summary)),
+            )
+            return cursor.rowcount == 1
+
+    def research_report(self, session_id, *, summary=False, report_id=None):
+        column = "summary_json" if summary else "report_json"
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT {column} FROM research_reports WHERE session_id=?"
+                + (" AND report_id=?" if report_id else "")
+                + " ORDER BY source_revision DESC, rowid DESC LIMIT 1",
+                (session_id, report_id) if report_id else (session_id,),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
     def save_research_blocks(self, session_id, file_id, blocks):
         with self._lock, self._connect() as db:
             db.execute("INSERT OR REPLACE INTO research_documents VALUES(?,?,?)", (session_id, file_id, _json(blocks)))
+
+    def research_source_location(self, session_id, file_id):
+        with self._connect() as db:
+            row = db.execute("SELECT json_extract(blocks_json, '$[0].location') FROM research_documents WHERE session_id=? AND file_id=?",
+                             (session_id, file_id)).fetchone()
+        return json.loads(row[0]) if row and row[0] else {}
 
     def research_blocks(self, session_id, file_id):
         with self._connect() as db:

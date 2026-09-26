@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -46,6 +47,17 @@ def runner(tmp_path):
     return ValuationRunner(
         SQLiteRunStore(tmp_path / "runtime"), ReferenceFinancialModel()
     )
+
+
+def test_sqlite_store_releases_database_handles_after_each_operation(tmp_path):
+    data_dir = tmp_path / "disposable-store"
+    store = SQLiteRunStore(data_dir)
+    store.list_runs()
+
+    # This is the failure mode on Windows when a sqlite3.Connection was used
+    # as a transaction context manager but never explicitly closed.
+    shutil.rmtree(data_dir)
+    assert not data_dir.exists()
 
 
 def test_default_mode_uses_submitted_data_and_preserves_decimal(runner):

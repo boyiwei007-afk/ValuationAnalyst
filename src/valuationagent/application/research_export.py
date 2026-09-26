@@ -1,62 +1,26 @@
-"""One export path for both interfaces; research reports contain no invented valuation."""
-import html
+"""Shared CLI / API outcome report and detailed evidence package."""
 import json
+
+from valuationagent.application.result_document import ensure_result_document, render_html, render_pdf
 
 
 def build_research_export(service, session_id, format="json"):
+    if format not in {"json", "html", "pdf"}:
+        raise ValueError("支持 PDF、HTML 结果报告和 JSON 复核包。")
+    session = service.store.get_research(session_id)
+    document = ensure_result_document(service, session)
+    if format == "pdf":
+        return render_pdf(document), "application/pdf"
+    if format == "html":
+        return render_html(document), "text/html"
     snapshot = service.snapshot(session_id)
+    # Preserve the existing evidence-package contract for older consumers.
     snapshot["report_kind"] = "research_preparation"
-    snapshot["financial_model_status"] = "not_connected"
-    if format == "json":
-        return json.dumps(snapshot, ensure_ascii=False, indent=2), "application/json"
-    if format != "html":
-        raise ValueError("当前支持 JSON 复核包和 HTML 研究报告。")
-    session = snapshot["session"]
-    esc = lambda value: html.escape(str(value)) if value is not None else "—"
-    rows = "".join("<tr>" + "".join(f"<td>{esc(f[key])}</td>" for key in
-        ("metric", "raw_value", "unit", "normalized_value", "period", "scope", "status", "quote", "block_id")) + "</tr>" for f in session["facts"])
-    documents = "".join(
-        "<tr>" + "".join(f"<td>{esc(value)}</td>" for value in (
-            item["name"], item["role"], item["block_count"], item.get("size_bytes", 0),
-            item.get("sha256", ""), "; ".join(item.get("warnings", [])),
-        )) + "</tr>" for item in session["documents"]
-    )
-    memory = "".join(
-        "<tr>" + "".join(f"<td>{esc(item.get(key, ''))}</td>" for key in
-        ("key", "kind", "content", "source_message_id", "updated_at")) + "</tr>"
-        for item in session.get("memory", [])
-    )
-    trail = "".join(
-        "<tr>" + "".join(f"<td>{esc(value)}</td>" for value in (
-            event["sequence"], event["type"], event.get("tool") or "",
-            event["status"], event.get("duration_ms"), event["summary"],
-        )) + "</tr>" for event in snapshot["events"]
-    )
-    messages = "".join(f"<article><b>{esc(m['role'])}</b><p>{esc(m['content'])}</p></article>" for m in snapshot["messages"])
-    issue = esc(json.dumps(session.get("last_issue"), ensure_ascii=False, indent=2)) if session.get("last_issue") else "无 / None"
-    question = session.get("question")
-    pending = (f"<p>{esc(question['title'])}</p><ul>" + "".join(
-        f"<li><b>{esc(option['label'])}</b> {esc(option.get('description', ''))}</li>"
-        for option in question["options"]
-    ) + "</ul>") if question else "<p>无待确认事项 / No pending confirmation.</p>"
-    content = f"""<!doctype html><html lang="{esc(session['language'])}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ValuationAgent · Research report</title><style>
-*{{box-sizing:border-box}}body{{font:15px/1.7 'Segoe UI','Microsoft YaHei',sans-serif;color:#173047;max-width:1120px;margin:40px auto;padding:24px;background:#fcfdfd}}
-h1{{color:#087f75;font-size:clamp(22px,4vw,32px);line-height:1.35}}h2{{font-size:19px;margin-top:32px}}table{{border-collapse:collapse;width:100%;font-size:12px}}td,th{{border:1px solid #d7e1e8;padding:8px;text-align:left;overflow-wrap:anywhere;min-width:90px;max-width:320px}}th{{background:#edf4f5;color:#31536a}}p{{white-space:pre-wrap;overflow-wrap:anywhere}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f7;padding:16px;border-radius:10px;font-size:12px}}article{{border-top:1px solid #e2e8f0;padding:12px 0}}.note{{background:#eaf6f3;padding:16px;border-left:3px solid #087f75;border-radius:6px}}.table-scroll{{overflow-x:auto;border-radius:8px}}@media(max-width:600px){{body{{margin:12px auto;padding:16px}}}}@media print{{body{{margin:0;padding:8px;background:white}}tr{{break-inside:avoid}}.table-scroll{{overflow:visible}}td,th{{min-width:0;max-width:none;padding:4px;font-size:9px}}}}
-</style></head><body><h1>ValuationAgent · 研究资料报告 / Research preparation</h1>
-<p class="note">正式金融模型未接入，本报告不包含正式估值。Financial model not connected; no valuation is issued.</p>
-<p>{esc(session['session_id'])} · v{session['revision']} · {esc(session['updated_at'])}</p>
-<p>Agent {esc(session.get('agent_protocol_version', ''))} · Prompt {esc(session.get('prompt_version', ''))} · Model {esc(session.get('model_provider', ''))}/{esc(session.get('model_name', ''))}</p>
-<h2>研究摘要 / Summary</h2><p>{esc(session.get('summary') or '尚未形成研究摘要 / No research summary yet.')}</p>
-<h2>研究范围 / Scope</h2><pre>{esc(json.dumps(session['draft'], ensure_ascii=False, indent=2))}</pre>
-<h2>资料清单与哈希 / Source manifest</h2><table><thead><tr><th>文件</th><th>用途</th><th>原文块</th><th>字节</th><th>SHA-256</th><th>警告</th></tr></thead><tbody>{documents}</tbody></table>
-<h2>字段与原文 / Facts & sources</h2><table><thead><tr><th>字段</th><th>原值</th><th>单位</th><th>标准化数值</th><th>期间</th><th>口径</th><th>状态</th><th>原文</th><th>来源 ID</th></tr></thead><tbody>{rows}</tbody></table>
-<h2>缺口 / Gaps</h2><p>{esc(chr(10).join(session['gaps']))}</p>
-<h2>待确认事项 / Pending confirmation</h2>{pending}
-<h2>长期上下文 / Durable context</h2><table><thead><tr><th>键</th><th>类型</th><th>内容</th><th>来源消息</th><th>更新时间</th></tr></thead><tbody>{memory}</tbody></table>
-<h2>最近异常 / Latest issue</h2><pre>{issue}</pre>
-<h2>执行审计 / Execution trail</h2><table><thead><tr><th>#</th><th>事件</th><th>工具</th><th>状态</th><th>耗时 ms</th><th>摘要</th></tr></thead><tbody>{trail}</tbody></table>
-<h2>研究记录 / Conversation</h2>{messages}</body></html>"""
-    content = content.replace("<table>", '<div class="table-scroll"><table>').replace("</table>", "</table></div>")
-    return content, "text/html"
+    snapshot["result_document"] = document
+    run_id = session.valuation_run_id
+    snapshot["financial_model_status"] = "not_submitted"
+    if run_id:
+        record = service.store.get_run(run_id)
+        snapshot["financial_model_status"] = str(record.status)
+        snapshot["valuation_result"] = record.result.model_dump(mode="json") if record.result else None
+    return json.dumps(snapshot, ensure_ascii=False, indent=2), "application/json"

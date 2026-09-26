@@ -617,23 +617,27 @@ def export(run_id: str, destination: Path = typer.Option(..., "--output", "-o"))
         if destination.exists():
             raise ValueError("目标文件已存在，请指定新文件名。")
         extension = destination.suffix.lower().lstrip(".") or "json"
-        if extension == "json":
-            payload = {
-                "run": record.model_dump(mode="json"),
-                "artifacts": store.artifacts(run_id),
-                "events": [e.model_dump(mode="json") for e in store.list_events(run_id)],
-            }
-            destination.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        else:
-            content, _, _ = ValuationReportExporter().export(record, extension)
-            destination.write_bytes(content)
+        content, _, _ = ValuationReportExporter().export(record, extension, store=store)
+        destination.write_bytes(content)
         console.print(Text(f"已导出：{destination.resolve()}", style="good"))
     except KeyError:
         friendly_error(ValueError("任务不存在。"))
     except (ValueError, OSError) as exc:
         friendly_error(exc)
+
+
+@app.command()
+def replay(package: Path):
+    """离线复算 JSON 包；不调用模型或联网服务，不修改原任务。"""
+    from valuationagent.application.reproducibility import replay_bundle
+    try:
+        result = replay_bundle(json.loads(package.read_text(encoding="utf-8-sig")))
+        console.print_json(data=result)
+        if not result["passed"]:
+            raise typer.Exit(1)
+    except (ValueError, OSError) as exc:
+        friendly_error(exc)
+        raise typer.Exit(1) from None
 
 
 @app.command()

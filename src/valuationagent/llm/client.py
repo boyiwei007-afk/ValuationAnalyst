@@ -62,7 +62,16 @@ class OpenAICompatibleClient:
         try:
             with httpx.Client(timeout=self.config.timeout_seconds) as client:
                 for attempt in range(3):
-                    response = client.post(endpoint, headers=headers, json=payload)
+                    try:
+                        response = client.post(endpoint, headers=headers, json=payload)
+                    except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError):
+                        # One bounded transport retry; a timed-out generation
+                        # may already have consumed provider credits.
+                        if attempt >= 1:
+                            raise
+                        if self.revoked.wait(.4):
+                            raise LlmError("MODEL_SESSION_REVOKED: 模型会话已删除。")
+                        continue
                     if response.status_code not in {429, 502, 503, 504} or attempt == 2:
                         break
                     if self.revoked.wait(.4 * (2 ** attempt)):

@@ -1,0 +1,8 @@
+name: economic_agent
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11.16
+  - pip=26.2.1
+  - nodejs=24.11.1
+

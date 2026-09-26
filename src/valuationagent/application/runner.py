@@ -203,12 +203,14 @@ class ValuationRunner:
             # Use the effective uploaded assumptions as the base before switching to manual.
             if parent.result:
                 # Preserve advanced request inputs (for example beta and market
-                # rates) and carry forward the four assumptions the model may
+                # rates) and carry forward the assumptions the model may
                 # already have resolved or the user may have revised.
                 effective_assumptions = dict(original.get("assumptions") or {})
                 for field_name in (
                     "revenue_growth",
                     "ebit_margin",
+                    "revenue_growth_scenarios",
+                    "ebit_margin_scenarios",
                     "wacc",
                     "terminal_growth",
                 ):

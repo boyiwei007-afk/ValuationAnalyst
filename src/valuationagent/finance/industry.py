@@ -17,6 +17,9 @@ FINANCIAL_KEYWORDS = (
     "金融业",
     "金融服务",
 )
+CONSUMER_STAPLES_KEYWORDS = (
+    "食品饮料",
+)
 
 
 class IndustryResolutionError(ValueError):
@@ -51,6 +54,7 @@ class IndustryParameters:
     source_sha256: str
     metadata_completeness: str
     required_metadata_missing: tuple[str, ...]
+    provenance_note: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +76,7 @@ class IndustryParameters:
             "source_sha256": self.source_sha256,
             "metadata_completeness": self.metadata_completeness,
             "required_metadata_missing": list(self.required_metadata_missing),
+            "provenance_note": self.provenance_note,
         }
 
 
@@ -126,15 +131,29 @@ class IndustryParameterRegistry:
             raise AmbiguousIndustry(
                 f"行业描述“{raw}”可对应多个参数行：{names}。请补充主营业务或明确选择。"
             )
+        fallback = False
+        if not unique and any(word in raw for word in CONSUMER_STAPLES_KEYWORDS):
+            # The checked-in source workbook snapshot has no dedicated food or
+            # beverage row. Reuse its industrial fallback mechanics instead of
+            # inventing unsupported industry statistics, and downgrade the row
+            # so every report makes the limitation explicit.
+            row = next(item for item in self._rows if item["id"] == "industrial_fallback")
+            unique = {row["id"]: row}
+            fallback = True
         if not unique:
             raise IndustryResolutionError(
                 f"行业参数库无法匹配“{raw}”。请在制造业/服务业兜底与具体行业之间确认。"
             )
         row = next(iter(unique.values()))
+        fallback_note = (
+            "参数库缺少食品饮料/白酒专属行；本次透明复用原始工业兜底参数，"
+            "仅供情景起点，质量降为C，提交前应以可核验行业资料替换。"
+            if fallback else ""
+        )
         return IndustryParameters(
-            industry_id=row["id"],
-            category=row["category"],
-            name=row["name"],
+            industry_id="consumer_staples_fallback" if fallback else row["id"],
+            category="消费品" if fallback else row["category"],
+            name="食品饮料 / 白酒（保守兜底）" if fallback else row["name"],
             domestic_growth=D(str(row["domestic_growth"])),
             cycle_label=row["cycle_label"],
             window_years=int(row["window_years"]),
@@ -144,12 +163,16 @@ class IndustryParameterRegistry:
             rnd_wage_factor=D(str(row["rnd_wage_factor"])),
             admin_wage_factor=D(str(row["admin_wage_factor"])),
             beta_default=D(str(row["beta_default"])),
-            quality=row["quality"],
+            quality="C" if fallback else row["quality"],
             version=self.version,
             source_file=self.source_file,
             source_sha256=self.source_sha256,
-            metadata_completeness=self.metadata_completeness,
-            required_metadata_missing=self.required_metadata_missing,
+            metadata_completeness="fallback" if fallback else self.metadata_completeness,
+            required_metadata_missing=(
+                (*self.required_metadata_missing, "dedicated_industry_parameters")
+                if fallback else self.required_metadata_missing
+            ),
+            provenance_note=fallback_note,
         )
 
     def describe(self) -> dict[str, Any]:

@@ -6,6 +6,7 @@ import questionary
 from rich.text import Text
 from rich.live import Live
 from rich.console import Group
+from rich.table import Table
 from valuationagent.application.research import ResearchService
 from valuationagent.search.providers import (
     TavilySearchProvider,
@@ -260,8 +261,8 @@ def getting_started(language="zh-CN"):
     en = language == "en-US"
     body = Text()
     body.append("Start with a question or a file.\n" if en else "先说需求，或直接提供资料。\n", style="title")
-    body.append("I want to research 600519 and identify missing financial data.\n" if en else "“我想研究 600519，先帮我看看需要哪些财务数据。”\n", style="accent")
-    body.append("Upload annual reports, Excel tables or policy text.\n" if en else "上传年报、Excel 财务表或政策原文，先整理信息和来源。\n")
+    body.append("Start a valuation of 600519 and produce ranges, sensitivity analysis and a report.\n" if en else "“请对 600519 进行估值，给出估值区间、敏感性分析和报告。”\n", style="accent")
+    body.append("Provide annual reports or let the Agent find sources, build the model and propose assumptions for review.\n" if en else "上传年报或选择联网获取；Agent 连续补齐模型输入，提出预测假设，整套方案确认后计算。\n")
     body.append("/upload path  ·  /connect  ·  /search  ·  /market  ·  /prepare  ·  /help\n", style="muted")
     body.append("Choose an option when asked, or enter your own requirements." if en else "需要确认时可选答案，也可以输入自己的修改要求。", style="muted")
     return panel(body, "What can I do?" if en else "你可以这样开始")
@@ -377,6 +378,28 @@ def launch_research(language=None, session_id=None):
             session = store.get_research(session_id)
             if session.question and seen_question != session.question.question_id:
                 question = session.question
+                if question.valuation_review:
+                    plan = question.valuation_review
+                    assumptions = plan.get("assumptions", {})
+                    def percent(value):
+                        return "—" if value is None else f"{float(value) * 100:.2f}%"
+                    console.print(panel(Text(
+                        f"{' / '.join(plan['methods']).upper()} · {plan['valuation_date']} · 基期 {plan['baseline_period']}\n"
+                        f"WACC {percent(assumptions.get('wacc'))} / g {percent(assumptions.get('terminal_growth'))}\n"
+                        + plan["forecast_rationale"] + "\n" + "；".join(plan["risks"])
+                        + "\n预测是假设，不是历史事实。确认后直接计算；财务校验仍可能要求修正。"),
+                        "Valuation plan" if en else "待确认估值方案"))
+                    for key, title in (("revenue_growth_scenarios", "Revenue growth / 收入增长率"),
+                                       ("ebit_margin_scenarios", "EBIT margin / 利润率")):
+                        paths = assumptions.get(key)
+                        if not paths:
+                            continue
+                        table = Table(title=title)
+                        for column in ("Year / 年", "Pessimistic / 悲观", "Base / 基准", "Optimistic / 乐观"):
+                            table.add_column(column)
+                        for i in range(10):
+                            table.add_row(str(i + 1), *(percent(paths[name][i]) for name in ("pessimistic", "base", "optimistic")))
+                        console.print(table)
                 if question.proposed_draft:
                     draft = question.proposed_draft
                     fields = [("Company" if en else "公司", draft.company or draft.ticker or ("Pending" if en else "待补充")),
@@ -422,9 +445,9 @@ def launch_research(language=None, session_id=None):
                 default_prompt = ""
                 if configured_company:
                     default_prompt = (
-                        f"I want to research {configured_company}. First identify the historical data needed."
+                        f"Start a valuation of {configured_company}: verify official data, propose suitable methods and assumptions for my review, and produce valuation ranges, sensitivity analysis and a report."
                         if en
-                        else f"我想研究 {configured_company}，先帮我梳理需要哪些历史财务数据。"
+                        else f"请对 {configured_company} 进行估值：核验官方数据，提出适用方法和预测假设让我确认，完成估值区间、敏感性分析和报告。"
                     )
                     configured_company = ""
                 content = text_input("Chat", default=default_prompt).strip()
@@ -434,7 +457,7 @@ def launch_research(language=None, session_id=None):
                     break
                 if content == "/help":
                     console.print(getting_started(language))
-                    console.print(Text("/upload 路径 · /files · /memory · /tools · /confirm · /connect · /search · /market · /prepare · /valuation\n/company 名称 · /industry 行业 · /date YYYY-MM-DD · /methods dcf,pe,ps,ev_ebitda\n/export json|html · /wizard · /demo · /quit", style="muted"))
+                    console.print(Text("/upload 路径 · /files · /memory · /tools · /confirm · /connect · /search · /market · /prepare · /valuation\n/company 名称 · /industry 行业 · /date YYYY-MM-DD · /methods dcf,pe,ps,ev_ebitda\n/export pdf|html|json · /wizard · /demo · /quit", style="muted"))
                     continue
                 if content == "/confirm":
                     seen_question = None
@@ -490,23 +513,6 @@ def launch_research(language=None, session_id=None):
                     from valuationagent.cli.main import demo
                     demo(company="估值演示公司", valuation_date=None, chat=False, plain=True, language=language)
                     continue
-                if content == "/valuation":
-                    try:
-                        record = service.submit_valuation(session_id, runner)
-                        with console.status("Running valuation…" if en else "正在执行正式估值流水线…"):
-                            record = runner.execute(record.run_id)
-                        if record.result is None:
-                            message = (record.error or {}).get("message") or (record.review or {}).get("message") or str(record.status)
-                            raise ValueError(message)
-                        console.print(panel(Text(record.result.executive_summary), "Valuation result" if en else "估值结果"))
-                        console.print(Text(
-                            (f"Export: valuationagent export {record.run_id} -o report.xlsx / report.pdf" if en else
-                             f"导出：valuationagent export {record.run_id} -o report.xlsx（或 report.pdf）"),
-                            style="muted",
-                        ))
-                    except (ValueError, OSError) as exc:
-                        console.print(panel(Text(_error_message(exc), style="warn"), "Valuation" if en else "提交估值"))
-                    continue
                 if content == "/files":
                     for doc in session.documents:
                         console.print(Text(f"{doc.name} · {doc.block_count} blocks · {doc.file_id}"))
@@ -531,7 +537,10 @@ def launch_research(language=None, session_id=None):
                         directory = store.data_dir / "exports"
                         directory.mkdir(exist_ok=True)
                         target = directory / f"{session_id}-v{session.revision}.{format}"
-                        target.write_text(body, encoding="utf-8")
+                        if isinstance(body, bytes):
+                            target.write_bytes(body)
+                        else:
+                            target.write_text(body, encoding="utf-8")
                         console.print(Text(str(target.resolve()), style="good"))
                     except (ValueError, OSError) as exc:
                         console.print(panel(Text(str(exc)), "Export"))
@@ -562,6 +571,22 @@ def launch_research(language=None, session_id=None):
                 seen_question = None
                 continue
             console.print(panel(Text(result["messages"][-1]["content"]), "ValuationAgent"))
+            if result.get("action", {}).get("type") == "submit_valuation":
+                try:
+                    record = service.submit_valuation(session_id, runner)
+                    with console.status("Running valuation…" if en else "正在执行正式估值流水线…"):
+                        record = runner.execute(record.run_id)
+                    if record.result is None:
+                        message = (record.error or {}).get("message") or (record.review or {}).get("message") or str(record.status)
+                        raise ValueError(message)
+                    console.print(panel(Text(record.result.executive_summary), "Valuation result" if en else "估值结果"))
+                    console.print(Text(
+                        (f"Export: valuationagent export {record.run_id} -o report.xlsx / report.pdf" if en else
+                         f"导出：valuationagent export {record.run_id} -o report.xlsx（或 report.pdf）"),
+                        style="muted",
+                    ))
+                except (ValueError, OSError) as exc:
+                    console.print(panel(Text(_error_message(exc), style="warn"), "Valuation" if en else "提交估值"))
     except (KeyboardInterrupt, EOFError):
         pass
     finally:

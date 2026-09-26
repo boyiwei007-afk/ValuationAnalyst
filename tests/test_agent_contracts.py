@@ -139,6 +139,9 @@ def test_openai_compatible_client_normalizes_object_tool_arguments():
     ("message", "expected"),
     [
         ("我想研究 600519，先整理年报", "new_valuation"),
+        ("请立即开始正式估值", "run_valuation"),
+        ("/valuation", "run_valuation"),
+        ("Run the formal valuation", "run_valuation"),
         ("请解释 WACC 和敏感性分析", "ask_explanation"),
         ("把 WACC 改为 8%", "revise_assumption"),
         ("分析这份监管政策", "policy_analysis"),
@@ -149,3 +152,48 @@ def test_intent_baseline_is_explicit_and_context_aware(message, expected):
     result = interpret_intent(message, {"company": "贵州茅台", "revision": 3})
     assert result.intent == expected
     assert result.slots["company"] == "贵州茅台"
+
+
+def test_intent_extracts_company_name_immediately_after_a_share_code():
+    result = interpret_intent("我想研究 600276 恒瑞医药的历史财务数据并估值（申万行业：医药生物—化学制药）")
+    assert result.slots["ticker"] == "600276"
+    assert result.slots["company"] == "恒瑞医药"
+    assert result.slots["industry"] == "医药生物—化学制药"
+
+    compact = interpret_intent("研究600276恒瑞医药（行业：医药生物）")
+    assert compact.slots["company"] == "恒瑞医药"
+    assert "company" not in interpret_intent("研究 600276 历史数据").slots
+
+    parenthesized = interpret_intent("请对贵州茅台（600519.SH）开展估值")
+    assert parenthesized.slots["ticker"] == "600519.SH"
+    assert parenthesized.slots["company"] == "贵州茅台"
+
+
+def test_intent_extracts_explicit_valuation_date_and_methods():
+    result = interpret_intent(
+        "研究 600276 恒瑞医药，估值日：2025-12-31，方法：DCF、PE"
+    )
+
+    assert result.slots["valuation_date"] == "2025-12-31"
+    assert result.slots["methods"] == ["dcf", "pe"]
+
+    trailing = interpret_intent("对贵州茅台（600519.SH）只使用 DCF 和 PE 方法")
+    assert trailing.slots["methods"] == ["dcf", "pe"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "为什么不能执行正式估值？",
+        "暂不开始估值，先核对数据",
+        "系统提示中提到了 /valuation 命令，这是怎么回事？",
+    ],
+)
+def test_valuation_mentions_are_not_mistaken_for_submission(message):
+    assert interpret_intent(message).intent != "run_valuation"
+
+
+def test_tushare_opt_out_overrides_previous_valuation_intent():
+    result = interpret_intent("不使用 Tushare")
+    assert result.intent == "provide_material"
+    assert result.slots["data_source"] == "not_tushare"

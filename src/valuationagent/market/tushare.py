@@ -24,6 +24,18 @@ from valuationagent.schemas.models import (
 D = Decimal
 TUSHARE_DOC = "https://tushare.pro/document/2"
 
+
+class TushareApiError(ValueError):
+    """Safe provider error that keeps the failing API name."""
+
+    def __init__(self, api_name: str, message: str):
+        self.api_name = api_name
+        super().__init__(f"Tushare接口 {api_name} 失败：{message}")
+
+
+class TusharePermissionError(TushareApiError):
+    """The token is valid but cannot call one optional or required API."""
+
 TUSHARE_INDUSTRY_MAP = (
     (("软件", "IT", "互联网", "元器件", "半导体", "通信设备", "电脑设备"), "电子 / 计算机 / 半导体"),
     (("医药", "医疗", "生物", "制药"), "医药 / 生物"),
@@ -142,12 +154,11 @@ class TushareApiClient:
             raise ValueError(f"Tushare数据请求失败{suffix}，请检查网络与数据源配置。") from None
         if int(body.get("code", -1)) != 0:
             raw = str(body.get("msg") or "").lower()
-            message = (
-                "Token无效或权限不足" if "token" in raw
-                else "接口权限不足" if "权限" in raw or "permission" in raw
-                else f"供应商错误代码 {body.get('code')}"
-            )
-            raise ValueError(f"Tushare接口 {api_name} 失败：{message}")
+            if "token" in raw:
+                raise TushareApiError(api_name, "Token无效或权限不足")
+            if "权限" in raw or "permission" in raw:
+                raise TusharePermissionError(api_name, "接口权限不足")
+            raise TushareApiError(api_name, f"供应商错误代码 {body.get('code')}")
         data = body.get("data") or {}
         names = data.get("fields") or []
         return [dict(zip(names, row)) for row in data.get("items") or []]
@@ -556,9 +567,30 @@ class TushareDataProvider:
         if request.mode == "demo" or request.data_source != "ticker":
             return self.local.resolve(request, store)
         ticker = normalize_a_share_ticker(request.company.ticker or "")
-        company = self._company(ticker)
-        daily = self._latest_daily(ticker, request.valuation_date)
         market_warnings: list[str] = []
+        try:
+            company = self._company(ticker)
+        except TusharePermissionError as exc:
+            if not request.company.industry:
+                raise ValueError(
+                    f"{exc}。Token 可以连接 Tushare，但无法读取公司行业；"
+                    "为避免把金融企业或错误行业套入通用FCFF模型，请回到研究对话确认该公司的非金融行业，"
+                    "例如“行业为医药 / 生物，然后继续估值”，或为该Token开通 stock_basic 权限。"
+                ) from None
+            exchange = request.company.exchange or {
+                "SH": "SSE", "SZ": "SZSE", "BJ": "BSE",
+            }.get(ticker.rsplit(".", 1)[-1])
+            company = request.company.model_copy(update={
+                "ticker": ticker,
+                "name": request.company.name or ticker,
+                "exchange": exchange,
+                "currency": "CNY",
+            })
+            market_warnings.append(
+                "Tushare stock_basic 权限不足；公司名称与行业采用研究会话中已确认的信息，"
+                "并保留为数据质量限制。"
+            )
+        daily = self._latest_daily(ticker, request.valuation_date)
         try:
             market_cap_statistics = self._market_cap_statistics(
                 ticker, request.valuation_date
@@ -578,8 +610,15 @@ class TushareDataProvider:
         warnings = market_warnings + warnings
         peers = list(request.peers)
         if any(method != "dcf" for method in request.methods) and not peers:
-            peers, peer_warnings = self._select_peers(company, daily, request.valuation_date)
-            warnings.extend(peer_warnings)
+            try:
+                peers, peer_warnings = self._select_peers(company, daily, request.valuation_date)
+                warnings.extend(peer_warnings)
+            except ValueError as exc:
+                peers = []
+                warnings.append(
+                    f"自动可比公司筛选未完成（{exc}）。DCF继续执行；PE、PS和EV/EBITDA"
+                    "将标记为样本不足，补充至少3家经确认的可比公司后可创建更正版本。"
+                )
         model_industry, mapping_warning = map_tushare_industry(company.industry or "")
         company = company.model_copy(update={"industry": model_industry})
         if mapping_warning:

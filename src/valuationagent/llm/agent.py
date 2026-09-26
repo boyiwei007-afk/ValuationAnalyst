@@ -7,7 +7,7 @@ from valuationagent.llm.client import LlmError
 
 
 def run_tool_loop(
-    llm, messages: list[dict], registry: ToolRegistry, call: Callable, *, max_rounds=6, max_tokens=900
+    llm, messages: list[dict], registry: ToolRegistry, call: Callable, *, max_rounds=6, max_tokens=900, check_cancel=None
 ):
     """Finite, auditable tool loop with bounded self-correction.
 
@@ -20,8 +20,12 @@ def run_tool_loop(
     failed_signatures: dict[str, int] = {}
     last_failure = ""
     for round_index in range(1, max_rounds + 1):
+        if check_cancel:
+            check_cancel()
         trace["rounds"] = round_index
         reply = llm.chat(messages, tools=registry.schemas(), tool_choice="required", max_tokens=max_tokens)
+        if check_cancel:
+            check_cancel()
         if not isinstance(reply, dict):
             raise LlmError("TOOL_RESPONSE_INVALID: 模型未返回有效的工具调用消息。")
         calls = reply.get("tool_calls") or []

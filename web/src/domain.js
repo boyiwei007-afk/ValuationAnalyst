@@ -113,3 +113,22 @@ export function sensitivityGrid(cells) {
     valid: cells.filter(c => c.valid && c.per_share_value != null),
   }
 }
+
+export function metricLabel(metric, t) {
+  const names = {
+    revenue: ['营业收入', 'Revenue'], ebit: ['息税前利润', 'EBIT'],
+    ebit_margin: ['EBIT 利润率', 'EBIT margin'], tax_rate: ['有效所得税率', 'Effective tax rate'],
+    depreciation_amortization: ['折旧与摊销', 'D&A'], capital_expenditure: ['资本开支', 'CapEx'],
+    change_operating_nwc: ['经营性营运资本变动', 'Change in operating NWC'],
+    cash_and_non_operating_assets: ['现金及非经营性资产', 'Cash & non-operating assets'],
+    interest_bearing_debt: ['有息负债', 'Interest-bearing debt'], common_shares: ['普通股股数', 'Common shares'],
+    net_income_parent: ['归母净利润', 'Parent net income'], ebitda: ['EBITDA', 'EBITDA'],
+    pe: ['市盈率 P/E', 'P/E'], ps: ['市销率 P/S', 'P/S'], ev_ebitda: ['EV/EBITDA', 'EV/EBITDA'],
+  }
+  return names[metric] ? t(...names[metric]) : metric
+}
+
+export function studyLabel(parameter, t) {
+  const parts = parameter.split(' · ')
+  return parts.length === 2 ? `${parts[0]} · ${parts[1] === '可比倍数' ? t('可比倍数', 'Peer multiples') : metricLabel(parts[1], t)}` : parameter
+}
